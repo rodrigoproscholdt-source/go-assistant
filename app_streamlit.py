@@ -43,7 +43,13 @@ def get_dme_engine():
 
 try:
     dme = get_dme_engine()
-    st.success(f"✅ DME Engine pronto — Base: {dme.collection.count()} chunks")
+    st.success(
+        f"✅ DME pronto — {dme.count()} chunks | fontes: {', '.join(dme.books)}"
+    )
+    st.caption(
+        f"Busca hibrida (vetor + BM25) com validacao LLM. "
+        f"Embeddings: ONNX local, sem torch."
+    )
 except Exception as e:
     st.error(f"Erro DME: {e}")
     st.code(traceback.format_exc())
@@ -80,10 +86,19 @@ if prompt := st.chat_input("Descreva o caso clínico (ou use /comando)..."):
             ctx = parse_clinical_input(text)
 
             # Executa DME completo
-            with st.spinner("🧠 Executando Differential Matrix Engine..."):
+            with st.spinner("Executando Differential Matrix Engine..."):
                 answer = dme.run_dme(ctx)
 
             st.markdown(answer)
+            with st.expander("Fontes consultadas (resultado da busca)"):
+                ctxs = dme.hybrid_search(ctx.complaint, k=10, max_dist=0.68)
+                for i, c in enumerate(ctxs, 1):
+                    m = c["metadata"]
+                    st.markdown(
+                        f"**{i}. {m.get('book')}** p.{m.get('page')} "
+                        f"(relevancia={c['score']:.3f})"
+                    )
+                    st.caption(c["text"][:300])
 
         except Exception as e:
             st.error(f"Erro: {e}")

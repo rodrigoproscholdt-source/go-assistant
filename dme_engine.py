@@ -6,6 +6,8 @@ Toda query passa por este pipeline antes de responder.
 import os
 import re
 import json
+import unicodedata
+from pathlib import Path
 from typing import List, Dict, Any, Optional
 from dataclasses import dataclass, asdict
 from groq import Groq
@@ -16,6 +18,25 @@ GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 GROQ_MODEL = "openai/gpt-oss-120b"
 MAX_DIST = 0.62
 TOP_K = 10
+
+BASE = Path(__file__).parent
+COLLECTION_NAME = "go_books"
+# uma base por livro: cada chroma.sqlite3 fica abaixo do limite de 100 MB do GitHub
+SHARD_DIRS = {
+    "Williams": BASE / "chroma_db_williams",
+    "SOGIMIG": BASE / "chroma_db_sogimig",
+    "FEBRASGO": BASE / "chroma_db_febrasgo",
+}
+LEGACY_DIR = BASE / "chroma_db"
+
+
+@dataclass
+class Shard:
+    book: str
+    col: Any
+    docs: List[str]
+    metas: List[Dict]
+    offset: int
 
 
 @dataclass
@@ -54,96 +75,169 @@ class ClinicalContext:
 
 
 class DMEEngine:
-    def __init__(self, chroma_db_path: str = "chroma_db"):
+    def __init__(self, shard_dirs: Optional[Dict[str, Path]] = None):
         self.groq = Groq(api_key=GROQ_API_KEY)
-        self.chroma_client = chromadb.PersistentClient(path=chroma_db_path)
-        self.collection = self.chroma_client.get_or_create_collection("go_books")
-        self._load_bm25()
+        dirs = shard_dirs if shard_dirs is not None else SHARD_DIRS
 
-    def _load_bm25(self):
-        data = self.collection.get(include=["documents", "metadatas"])
-        self.docs = data["documents"]
-        self.metas = data["metadatas"]
-        self.bm25 = BM25Okapi([self._norm(d) for d in self.docs])
-        self.doc_index = {d[:120]: i for i, d in enumerate(self.docs)}
+        self.shards: List[Shard] = []
+        docs: List[str] = []
+        metas: List[Dict] = []
+
+        for book, path in dirs.items():
+            if not (path / "chroma.sqlite3").exists():
+                continue
+            client = chromadb.PersistentClient(path=str(path))
+            col = client.get_collection(COLLECTION_NAME)
+            if col.count() == 0:
+                continue
+            d = col.get(include=["documents", "metadatas"])
+            self.shards.append(Shard(book, col, d["documents"], d["metadatas"],
+                                     offset=len(docs)))
+            docs.extend(d["documents"])
+            metas.extend(d["metadatas"])
+
+        if not self.shards and (LEGACY_DIR / "chroma.sqlite3").exists():
+            client = chromadb.PersistentClient(path=str(LEGACY_DIR))
+            col = client.get_collection(COLLECTION_NAME)
+            d = col.get(include=["documents", "metadatas"])
+            self.shards.append(Shard("BASE", col, d["documents"], d["metadatas"], 0))
+            docs.extend(d["documents"])
+            metas.extend(d["metadatas"])
+
+        if not self.shards:
+            raise RuntimeError(
+                "Nenhuma base encontrada. Rode 'python index_local.py' e depois "
+                "'python split_db.py' no PC e envie as pastas chroma_db_*."
+            )
+
+        self.docs = docs
+        self.metas = metas
+        self.doc_index = {d[:120]: i for i, d in enumerate(docs)}
+        self.bm25 = BM25Okapi([self._norm(d) for d in docs])
+
+    @property
+    def books(self) -> List[str]:
+        return [s.book for s in self.shards]
+
+    def count(self) -> int:
+        return len(self.docs)
+
+    def _shard_of(self, idx: int) -> Shard:
+        for s in self.shards:
+            if s.offset <= idx < s.offset + len(s.docs):
+                return s
+        return self.shards[-1]
 
     def _norm(self, s: str) -> List[str]:
-        s = re.sub(r"[^\w\s]", " ", s.lower())
-        return s.split()
+        s = unicodedata.normalize("NFKD", s.lower())
+        s = "".join(c for c in s if not unicodedata.combining(c))
+        return re.findall(r"[a-z0-9]+", s)
 
-    def hybrid_search(self, query: str, k: int = TOP_K, max_dist: float = MAX_DIST) -> List[Dict]:
-        # Vector
-        r = self.collection.query(query_texts=[query], n_results=30,
-                                  include=["documents", "metadatas", "distances"])
-        cands = {}
+    def hybrid_search(self, query: str, k: int = TOP_K,
+                      max_dist: float = MAX_DIST) -> List[Dict]:
+        """Busca vetorial em cada shard + BM25 global, fundidas por RRF."""
+        cands: Dict[tuple, Dict] = {}
 
         def add(idx, rrf_pts, dist=None):
-            key = (self.metas[idx]["book"], self.metas[idx]["page"],
+            key = (self.metas[idx].get("book"), self.metas[idx].get("page"),
                    self.docs[idx][:80])
             if key not in cands:
-                cands[key] = {"text": self.docs[idx],
-                              "metadata": self.metas[idx],
-                              "dist": dist if dist is not None else 9.9,
-                              "rrf": 0.0}
+                cands[key] = {"text": self.docs[idx], "metadata": self.metas[idx],
+                              "shard": self._shard_of(idx).book,
+                              "dist": 9.9 if dist is None else dist, "rrf": 0.0}
             cands[key]["rrf"] += rrf_pts
             if dist is not None:
                 cands[key]["dist"] = min(cands[key]["dist"], dist)
 
-        for rank, (d, m, dist) in enumerate(zip(r["documents"][0], r["metadatas"][0],
-                                                 r["distances"][0])):
-            i = self.doc_index.get(d[:120])
-            if i is not None:
-                add(i, 1 / (60 + rank), dist)
+        for s in self.shards:
+            n = min(30, len(s.docs))
+            if n <= 0:
+                continue
+            r = s.col.query(query_texts=[query], n_results=n,
+                            include=["documents", "metadatas", "distances"])
+            for rank, (d, m, dist) in enumerate(
+                    zip(r["documents"][0], r["metadatas"][0], r["distances"][0])):
+                i = self.doc_index.get(d[:120])
+                if i is not None:
+                    add(i, 1 / (60 + rank), dist)
 
-        # BM25
-        bs = self.bm25.get_scores(self._norm(query))
-        for rank, i in enumerate(bs.argsort()[::-1][:30]):
-            add(i, 1 / (60 + rank))
+        scores = self.bm25.get_scores(self._norm(query))
+        for rank, i in enumerate(scores.argsort()[::-1][:30]):
+            add(int(i), 1 / (60 + rank))
 
-        out = [c for c in cands.values() if c["dist"] <= max_dist or c["rrf"] >= 2 / 90]
+        out = [c for c in cands.values()
+               if c["dist"] <= max_dist or c["rrf"] >= 2 / 90]
         for c in out:
             c["score"] = max(0.0, 1 - c["dist"])
         out.sort(key=lambda c: c["rrf"], reverse=True)
         return out[:k]
 
+    def _chat(self, system: str, user: str, temperature: float = 0.0,
+              max_tokens: int = 6000, tries: int = 3) -> str:
+        """Chamada Groq com retry: o modelo as vezes devolve content vazio."""
+        last = ""
+        for attempt in range(tries):
+            try:
+                resp = self.groq.chat.completions.create(
+                    model=GROQ_MODEL,
+                    messages=[{"role": "system", "content": system},
+                              {"role": "user", "content": user}],
+                    temperature=temperature, max_tokens=max_tokens,
+                )
+                last = (resp.choices[0].message.content or "").strip()
+            except Exception as e:
+                last = f"__ERRO__ {e}"
+            if last and not last.startswith("__ERRO__"):
+                return last
+        return last
+
     def validate_chunks(self, question: str, ctxs: List[Dict]) -> List[Dict]:
+        """LLM julga quais trechos sao realmente relevantes. 1 chamada por lote."""
         if not ctxs:
             return []
         listing = "\n\n".join(
-            f"[{i}] {c['metadata']['book']} p.{c['metadata']['page']}: {c['text'][:350]}"
+            f"[{i}] {c['metadata'].get('book')} p.{c['metadata'].get('page')}: "
+            f"{c['text'][:350]}"
             for i, c in enumerate(ctxs)
         )
-        resp = self.groq.chat.completions.create(
-            model=GROQ_MODEL,
-            messages=[{"role": "user", "content":
-                "Abaixo estao trechos dos tratados (FEBRASGO, Williams, SOGIMIG). "
-                "Quais indices [N] contem informacao REALMENTE relevante para a pergunta? "
-                "Responda apenas os numeros separados por virgula, ou 'nenhum'.\n\n"
-                f"PERGUNTA: {question}\n\nTRECHOS:\n{listing}"}],
-            temperature=0.0, max_tokens=6000,
-        )
-        txt = (resp.choices[0].message.content or "").lower()
-        if "nenhum" in txt:
+        txt = self._chat(
+            "Voce e um curador de evidencia medica. Responde de forma curta e "
+            "objetiva, apenas com a lista de numeros.",
+            "Abaixo estao trechos dos tratados (FEBRASGO, Williams, SOGIMIG). "
+            "Quais indices [N] contem informacao REALMENTE relevante para a "
+            "pergunta? Responda apenas com os numeros separados por virgula "
+            f"ou 'nenhum'.\n\nPERGUNTA: {question}\n\nTRECHOS:\n{listing}",
+        ).lower()
+        if not txt or txt.startswith("__erro__") or "nenhum" in txt:
             return []
         nums = {int(n) for n in re.findall(r"\d+", txt) if int(n) < len(ctxs)}
         return [c for i, c in enumerate(ctxs) if i in nums]
 
     def build_dme_prompt(self, context: ClinicalContext, hypotheses: List[Hypothesis],
-                         pdf_contexts: Dict[str, List[Dict]]) -> str:
+                         pdf_contexts: Dict[str, List[Dict]],
+                         pool: Optional[List[Dict]] = None) -> str:
         hyp_text = "\n".join(
             f"{h.layer}. {h.diagnosis} (prob={h.probability:.0%}, sev={h.severity}, urg={h.urgency}, "
             f"compat={h.compatibility:.0%}, excl={h.exclusion_strength:.0%})"
             for h in hypotheses
         )
 
+        pool = pool if pool is not None else [
+            c for ctxs in pdf_contexts.values() for c in ctxs]
+
         pdf_blocks = ""
-        for sys_name, ctxs in pdf_contexts.items():
-            if ctxs:
-                pdf_blocks += f"\n--- {sys_name} ---\n"
-                pdf_blocks += "\n\n".join(
-                    f"[{c['metadata']['book']} p.{c['metadata']['page']}] {c['text'][:500]}"
-                    for c in ctxs[:5]
-                )
+        grouped: Dict[str, List[Dict]] = {}
+        for c in pool:
+            grouped.setdefault(c["metadata"].get("book", "?"), []).append(c)
+        for book in sorted(grouped):
+            pdf_blocks += f"\n--- {book} ---\n"
+            for c in grouped[book][:9]:
+                pdf_blocks += (f"\n[{book} p.{c['metadata'].get('page')}] "
+                               f"{c['text'][:550]}")
+            if len(grouped[book]) > 9:
+                pdf_blocks += f"\n[{book} +{len(grouped[book]) - 9} trechos validados]"
+
+        livros = ", ".join(sorted(grouped)) or "nenhum"
 
         return f"""Você é o DIFFERENTIAL MATRIX ENGINE (DME) — Ginecologia/Obstetrícia.
 Siga RIGOROSAMENTE o pipeline DME. Não pule etapas.
@@ -163,7 +257,7 @@ CONTEXTO CLÍNICO:
 HIPÓTESES GERADAS:
 {hyp_text}
 
-TRECHOS DOS TRATADOS (FEBRASGO, Williams, SOGIMIG):
+TRECHOS VALIDADOS DOS TRATADOS (fontes consultadas: {livros}):
 {pdf_blocks}
 
 === PIPELINE OBRIGATÓRIO ===
@@ -299,26 +393,46 @@ Imagem: {context.imaging}"""
         # 1. Hipóteses iniciais
         hypotheses = self.generate_initial_hypotheses(context)
 
-        # 2. Busca nos PDFs para cada hipótese
-        pdf_contexts = {}
+        # 2. Busca nos PDFs: 1 query por SISTEMA (agrupa hipoteses) + 1 query
+        #    pela queixa pura. Garante cobertura dos 3 livros sem explodir
+        #    o numero de chamadas ao LLM.
+        by_system: Dict[str, List[str]] = {}
         for h in hypotheses:
-            ctxs = self.search_pdf_for_hypothesis(h, context)
-            if ctxs:
-                pdf_contexts[h.diagnosis] = ctxs
+            by_system.setdefault(h.system or "Geral", []).append(h.diagnosis)
 
-        # 3. Prompt DME completo
-        prompt = self.build_dme_prompt(context, hypotheses, pdf_contexts)
+        queries: List[str] = [context.complaint]
+        for system, diags in by_system.items():
+            queries.append(f"{context.complaint} {system} {' '.join(diags[:4])}")
 
-        # 4. Resposta final DME
-        resp = self.groq.chat.completions.create(
-            model=GROQ_MODEL,
-            messages=[
-                {"role": "system", "content": "Você é o DME — Differential Matrix Engine. Siga o pipeline rigorosamente. Responda no formato Markdown obrigatório."},
-                {"role": "user", "content": prompt},
-            ],
-            temperature=0.2, max_tokens=12000,
+        pool: List[Dict] = []
+        seen = set()
+        for q in queries[:6]:
+            for c in self.hybrid_search(q, k=8, max_dist=0.68):
+                key = (c["metadata"].get("book"), c["metadata"].get("page"),
+                       c["text"][:80])
+                if key not in seen:
+                    seen.add(key)
+                    pool.append(c)
+
+        # 3. Uma unica validacao para todo o pool
+        validated = self.validate_chunks(context.complaint, pool[:40])
+        by_book: Dict[str, List[Dict]] = {}
+        for c in validated:
+            by_book.setdefault(c["metadata"].get("book", "?"), []).append(c)
+        pdf_contexts = by_book if by_book else {}
+
+        # 4. Prompt DME completo
+        prompt = self.build_dme_prompt(context, hypotheses, pdf_contexts,
+                                       pool=validated)
+
+        # 5. Resposta final DME
+        return self._chat(
+            "Voce e o DME - Differential Matrix Engine. Siga o pipeline "
+            "rigorosamente. Responda em portugues, no formato Markdown "
+            "obrigatorio, citando livro e pagina. Nunca invente informacao "
+            "ausente dos trechos.",
+            prompt, temperature=0.2, max_tokens=12000,
         )
-        return resp.choices[0].message.content
 
 
 def parse_clinical_input(text: str) -> ClinicalContext:
