@@ -1,0 +1,16 @@
+__pycache__/
+*.pyc
+test_*.py
+*_log*.txt
+*_test*.txt
+*_test*.md
+ctx_dump*.txt
+cov*.txt
+coverage*.txt
+col_test.txt
+coldet*.txt
+hybrid_test.txt
+mem_hits.txt
+phrase_hits.txt
+booktitles.txt
+teste_resumo.md
