@@ -76,7 +76,9 @@ class ClinicalContext:
 
 class DMEEngine:
     def __init__(self, shard_dirs: Optional[Dict[str, Path]] = None):
-        self.groq = Groq(api_key=GROQ_API_KEY)
+        # Groq e criado sob demanda: permite testar a recuperacao sem chave
+        self._groq = None
+        self._shard_dirs = shard_dirs
         dirs = shard_dirs if shard_dirs is not None else SHARD_DIRS
 
         self.shards: List[Shard] = []
@@ -114,6 +116,17 @@ class DMEEngine:
         self.metas = metas
         self.doc_index = {d[:120]: i for i, d in enumerate(docs)}
         self.bm25 = BM25Okapi([self._norm(d) for d in docs])
+
+    @property
+    def groq(self) -> Groq:
+        if self._groq is None:
+            if not GROQ_API_KEY:
+                raise RuntimeError(
+                    "GROQ_API_KEY nao definida. No Streamlit Cloud configure em "
+                    "Settings > Secrets."
+                )
+            self._groq = Groq(api_key=GROQ_API_KEY)
+        return self._groq
 
     @property
     def books(self) -> List[str]:
