@@ -5,8 +5,12 @@ from pathlib import Path
 import streamlit as st
 
 st.set_page_config(page_title="Assistente GO — DME", layout="wide")
+BUILD = "2026-09-26-dme-v1.0"
 st.title("Assistente Ginecologia/Obstetrícia — DME Engine")
-st.caption("FEBRASGO + Williams + SOGIMIG | Groq gpt-oss-120b | Differential Matrix Engine")
+st.caption(
+    f"FEBRASGO + Williams + SOGIMIG | Groq gpt-oss-120b | "
+    f"build `{BUILD}`"
+)
 
 PDF_DIR = Path(__file__).parent
 DB_DIR = Path(__file__).parent / "chroma_db"
@@ -64,6 +68,10 @@ except Exception as e:
 if "messages" not in st.session_state:
     st.session_state.messages = []
 
+# Inicializado aqui para que NUNCA exista NameError, mesmo se o bloco de
+# chat for interrompido por excecao ou por uma versao antiga em cache.
+answer = "Nao foi possivel completar a analise. Tente novamente."
+
 if st.sidebar.button("Limpar historico"):
     st.session_state.messages = []
     st.rerun()
@@ -86,10 +94,6 @@ if prompt := st.chat_input("Descreva o caso clínico (ou use /comando)..."):
         st.markdown(prompt)
 
     with st.chat_message("assistant"):
-        answer = (
-            "Nao foi possivel completar a analise. "
-            "Verifique a conexao e tente novamente."
-        )
         try:
             ctx = parse_clinical_input(prompt.strip())
 
