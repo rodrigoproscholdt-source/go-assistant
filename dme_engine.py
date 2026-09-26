@@ -5,7 +5,7 @@ Toda query passa por este pipeline antes de responder.
 
 # Identifica a build em execucao. O Streamlit Cloud mostra esta linha no log
 # do container: se ela nao aparecer, o container nao fez redeploy.
-BUILD = "dme-v1.0-mod24"
+BUILD = "dme-v1.1-mod24"
 
 import os
 import re
@@ -727,6 +727,21 @@ REGRAS INEGOCIÁVEIS:
 - Cite livro e pagina em cada afirmacao relevante.
 - Se a evidencia for insuficiente, escreva "nos trechos validados nao
 encontrei esta informacao" em vez de preencher com suposicao.
+- FRAGMENTOS TRUNCADOS: os trechos acima sao cortados em ~550 caracteres.
+Se a frase parece incompleta, cortada no meio ou sem a condicao inteira,
+isso NAO sustenta inferencia - nao complemente com memoria propria. Declare
+que nos trechos validados nao encontrei a informacao.
+- FATOR DE RISCO/PROTETOR: o atributo (protetor, neutro, risco) deve seguir
+LITERALMENTE o trecho citado, com livro e pagina. Se dois trechos conflitam,
+declare o conflito citando as duas fontes. Exemplo ja corrigido: tabagismo
+NAO e fator protetor para aborto espontaneo.
+- PROIBIDO percentuais para intervencoes ou condutas comparadas (ex: "DIU
+reduz X%") e proibido misturar probabilidades de doencas com probabilidades
+de intervencoes. Percentual so se estiver EXPLICITAMENTE no trecho, com
+livro e pagina.
+- CONDUTA nao pode ser apenas "encaminhar / observar / reavaliar". Inclua ao
+menos uma opcao CONCRETA: o que fazer agora, com que prazo e qual criterio
+de escalonamento.
 - Destaque com ⚠️ tudo que nao pode ser perdido.
 - Nao prescreva sem qualificar: e suporte ao raciocinio clinico do
 profissional, que confirma a conduta.

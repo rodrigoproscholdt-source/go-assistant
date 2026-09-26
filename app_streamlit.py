@@ -6,10 +6,11 @@ from pathlib import Path
 import streamlit as st
 
 st.set_page_config(page_title="Assistente GO — DME", layout="wide")
-BUILD = "2026-09-26-dme-v1.0"
+BUILD = "2026-09-26-dme-v1.1"
+LLM_PROVIDER = os.getenv("LLM_PROVIDER", "groq").lower()
 st.title("Assistente Ginecologia/Obstetrícia — DME Engine")
 st.caption(
-    f"FEBRASGO + Williams + SOGIMIG | Groq gpt-oss-120b | "
+    f"FEBRASGO + Williams + SOGIMIG | LLM: {LLM_PROVIDER} | "
     f"build `{BUILD}`"
 )
 
@@ -37,6 +38,7 @@ PDF_DIR = Path(__file__).parent
 DB_DIR = Path(__file__).parent / "chroma_db"
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 
+st.sidebar.write(f"LLM provider: {LLM_PROVIDER}")
 st.sidebar.write(f"GROQ: {'OK' if GROQ_API_KEY else 'MISSING'}")
 st.sidebar.write(f"PDFs: {len(list(PDF_DIR.glob('*.pdf')))}")
 
