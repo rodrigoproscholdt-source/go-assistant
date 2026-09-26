@@ -1,5 +1,7 @@
 import os
 import traceback
+from pathlib import Path
+
 import streamlit as st
 
 st.set_page_config(page_title="Assistente GO — DME", layout="wide")
