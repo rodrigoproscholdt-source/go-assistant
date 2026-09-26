@@ -2,9 +2,6 @@ import os
 import traceback
 import streamlit as st
 from pathlib import Path
-import chromadb
-from chromadb.utils import embedding_functions
-from groq import Groq
 
 st.set_page_config(page_title="Assistente GO", layout="wide")
 st.title("Assistente Ginecologia/Obstetrica")
@@ -18,8 +15,18 @@ GROQ_MODEL = "llama-3.1-70b-versatile"
 TOP_K = 5
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 
-st.sidebar.write(f"GROQ_API_KEY: {'OK' if GROQ_API_KEY else 'MISSING'}")
+st.sidebar.write(f"GROQ: {'OK' if GROQ_API_KEY else 'MISSING'}")
 st.sidebar.write(f"PDFs: {len(list(PDF_DIR.glob('*.pdf')))}")
+
+try:
+    import chromadb
+    from chromadb.utils import embedding_functions
+    from groq import Groq
+    import pdfplumber
+except Exception as e:
+    st.sidebar.error(f"Import error: {e}")
+    st.sidebar.code(traceback.format_exc())
+    st.stop()
 
 
 @st.cache_resource
@@ -35,35 +42,44 @@ def get_collection():
     except Exception:
         pass
 
-    import pdfplumber
     all_chunks = []
-    for pdf_file in sorted(PDF_DIR.glob("*.pdf")):
-        with pdfplumber.open(pdf_file) as pdf:
-            book_label = "FEBRASGO" if "FEBRASGO" in pdf_file.name else "Williams"
-            for pn, page in enumerate(pdf.pages, 1):
-                text = page.extract_text()
-                if not text or len(text.strip()) < 50:
-                    continue
-                words = text.split()
-                for i in range(0, len(words), 800):
-                    chunk = " ".join(words[i:i + 800])
-                    if len(chunk.strip()) > 100:
-                        all_chunks.append({
-                            "text": chunk.strip(),
-                            "metadata": {"source": pdf_file.stem, "page": pn, "book": book_label}
-                        })
+    pdfs = sorted(PDF_DIR.glob("*.pdf"))
+    for pdf_file in pdfs:
+        try:
+            with pdfplumber.open(pdf_file) as pdf:
+                book_label = "FEBRASGO" if "FEBRASGO" in pdf_file.name else "Williams"
+                n_pages = len(pdf.pages)
+                for pn, page in enumerate(pdf.pages, 1):
+                    if pn % 50 == 0:
+                        st.write(f"{book_label}: pagina {pn}/{n_pages}...")
+                    text = page.extract_text()
+                    if not text or len(text.strip()) < 50:
+                        continue
+                    words = text.split()
+                    for i in range(0, len(words), 800):
+                        chunk = " ".join(words[i:i + 800])
+                        if len(chunk.strip()) > 100:
+                            all_chunks.append({
+                                "text": chunk.strip(),
+                                "metadata": {"source": pdf_file.stem, "page": pn, "book": book_label}
+                            })
+        except Exception as e:
+            st.write(f"Erro em {pdf_file.name}: {e}")
+
+    st.write(f"Total: {len(all_chunks)} chunks. Indexando...")
 
     col = client.get_or_create_collection(
         name=COLLECTION_NAME, embedding_function=emb_fn,
         metadata={"hnsw:space": "cosine"}
     )
     ids = [f"chunk_{i}" for i in range(len(all_chunks))]
-    for i in range(0, len(all_chunks), 100):
+    for i in range(0, len(all_chunks), 200):
         col.add(
-            ids=ids[i:i+100],
-            documents=[c["text"] for c in all_chunks[i:i+100]],
-            metadatas=[c["metadata"] for c in all_chunks[i:i+100]]
+            ids=ids[i:i+200],
+            documents=[c["text"] for c in all_chunks[i:i+200]],
+            metadatas=[c["metadata"] for c in all_chunks[i:i+200]]
         )
+        st.write(f"Indexados: {min(i+200, len(all_chunks))}/{len(all_chunks)}")
     return col
 
 
