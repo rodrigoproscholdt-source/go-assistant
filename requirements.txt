@@ -1,5 +1,14 @@
-streamlit>=1.35.0
-chromadb>=0.5.0
-groq>=0.13.0
-pdfplumber>=0.11.0
-rank_bm25>=0.2.2
+# Versoes EXATAS (nao ranges) de proposito: cada alteracao aqui força o
+# Streamlit Cloud a resolver dependencias e reconstruir o container.
+#
+# Nao trocar para >= sem motivo. Um redeploy nao acontece por push de codigo
+# se o resolvedor considera as dependencias ja satisfeitas - foi exatamente o
+# que deixou o container travado numa build antiga (86a69a2) enquanto o
+# repositorio ja estava em 8e50e36.
+streamlit==1.57.0
+chromadb==1.5.9
+groq==0.37.1
+pdfplumber==0.11.10
+rank_bm25==0.2.2
+onnxruntime==1.27.0
+tokenizers==0.22.2

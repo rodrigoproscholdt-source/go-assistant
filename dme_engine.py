@@ -1,7 +1,11 @@
-﻿"""
+"""
 Differential Matrix Engine (DME) — Motor de Raciocínio Clínico Obrigatório
 Toda query passa por este pipeline antes de responder.
 """
+
+# Identifica a build em execucao. O Streamlit Cloud mostra esta linha no log
+# do container: se ela nao aparecer, o container nao fez redeploy.
+BUILD = "dme-v1.0-mod24"
 
 import os
 import re
@@ -80,11 +84,50 @@ class ClinicalContext:
     multiples: str = ""
 
 
+MODULOS_24 = [
+    "01 Obstetricia geral e pre-natal de baixo risco",
+    "02 Emergencias obstetricas: DPP, previa, eclampsia, hemorragia, sepse, rotura",
+    "03 Medicina fetal e gestacao de alto risco",
+    "04 Infertilidade e medicina reprodutiva",
+    "05 Endocrinologia ginecologica: SOP, anovulacao, amenorreia, hiperprolactinemia",
+    "06 Menopausa e terapia hormonal",
+    "07 Contracepcao e planejamento familiar",
+    "08 Uroginecologia e piso pelvico: incontinencia, prolapso",
+    "09 Oncologia ginecolica: malignidade, estadiamento, cirurgia oncologica",
+    "10 Mastologia: nodulo mamario, carcinoma de mama",
+    "11 Ginecologia pediatrica e do adolescente: menarca, anomalia de Muller",
+    "12 Colposcopia e lesoes do tracto genital inferior: HPV, HSIL, cervicite",
+    "13 Cirurgia ginecolica: laparoscopia, histeroscopia, miomectomia",
+    "14 Endometriose",
+    "15 Adenomiose",
+    "16 Leiomiomas uterinos",
+    "17 Disturbios menstruais e dismenorreia",
+    "18 Dor pelvica cronica",
+    "19 Infeccoes, PID e DST",
+    "20 Aborto espontaneo e perda gestacional recorrente",
+    "21 Gestacao ectopica e dor em fossa iliaca",
+    "22 Hemorragia uterina anomala",
+    "23 Dor aguda ginecologica e abdomen agudo ginecologico",
+    "24 Climaterio e saude da mulher idosa",
+]
+
+
+def _modulos_24() -> str:
+    """Os 24 modulos de especialidade: cobertura, nao hierarquia.
+
+    Sem lista explicita o LLM so detalha os dominios que ja tem em mente.
+    Com a lista, ele e obrigado a checar cada um antes de responder.
+    """
+    return "\n".join(f"  {m}" for m in MODULOS_24)
+
+
 class DMEEngine:
     def __init__(self, shard_dirs: Optional[Dict[str, Path]] = None):
         # Groq e criado sob demanda: permite testar a recuperacao sem chave
         self._groq = None
+        print(f"[dme_engine] build={BUILD} carregado", flush=True)
         self._shard_dirs = shard_dirs
+
         dirs = shard_dirs if shard_dirs is not None else SHARD_DIRS
 
         self.shards: List[Shard] = []
@@ -100,7 +143,7 @@ class DMEEngine:
                 continue
             d = col.get(include=["documents", "metadatas"])
             self.shards.append(Shard(book, col, d["documents"], d["metadatas"],
-                                     offset=len(docs)))
+                                    offset=len(docs)))
             docs.extend(d["documents"])
             metas.extend(d["metadatas"])
 
@@ -161,17 +204,17 @@ class DMEEngine:
         return re.findall(r"[a-z0-9]+", s)
 
     def hybrid_search(self, query: str, k: int = TOP_K,
-                      max_dist: float = MAX_DIST) -> List[Dict]:
+                        max_dist: float = MAX_DIST) -> List[Dict]:
         """Busca vetorial em cada shard + BM25 global, fundidas por RRF."""
         cands: Dict[tuple, Dict] = {}
 
         def add(idx, rrf_pts, dist=None):
             key = (self.metas[idx].get("book"), self.metas[idx].get("page"),
-                   self.docs[idx][:80])
+                    self.docs[idx][:80])
             if key not in cands:
                 cands[key] = {"text": self.docs[idx], "metadata": self.metas[idx],
-                              "shard": self._shard_of(idx).book,
-                              "dist": 9.9 if dist is None else dist, "rrf": 0.0}
+                                "shard": self._shard_of(idx).book,
+                                "dist": 9.9 if dist is None else dist, "rrf": 0.0}
             cands[key]["rrf"] += rrf_pts
             if dist is not None:
                 cands[key]["dist"] = min(cands[key]["dist"], dist)
@@ -189,19 +232,19 @@ class DMEEngine:
                     add(i, 1 / (60 + rank), dist)
 
         scores = (self.bm25.get_scores(self._norm(query))
-                  if self.bm25 is not None else [])
+                if self.bm25 is not None else [])
         for rank, i in enumerate(list(scores.argsort()[::-1][:30]) if len(scores) else []):
             add(int(i), 1 / (60 + rank))
 
         out = [c for c in cands.values()
-               if c["dist"] <= max_dist or c["rrf"] >= 2 / 90]
+                if c["dist"] <= max_dist or c["rrf"] >= 2 / 90]
         for c in out:
             c["score"] = max(0.0, 1 - c["dist"])
         out.sort(key=lambda c: c["rrf"], reverse=True)
         return out[:k]
 
     def _chat(self, system: str, user: str, temperature: float = 0.0,
-              max_tokens: int = 6000, tries: int = 3) -> str:
+                max_tokens: int = 6000, tries: int = 3) -> str:
         """Chamada Groq com retry: o modelo as vezes devolve content vazio."""
         last = ""
         for attempt in range(tries):
@@ -209,7 +252,7 @@ class DMEEngine:
                 resp = self.groq.chat.completions.create(
                     model=GROQ_MODEL,
                     messages=[{"role": "system", "content": system},
-                              {"role": "user", "content": user}],
+                                {"role": "user", "content": user}],
                     temperature=temperature, max_tokens=max_tokens,
                 )
                 last = (resp.choices[0].message.content or "").strip()
@@ -242,8 +285,9 @@ class DMEEngine:
         return [c for i, c in enumerate(ctxs) if i in nums]
 
     def build_dme_prompt(self, context: ClinicalContext, hypotheses: List[Hypothesis],
-                         pdf_contexts: Dict[str, List[Dict]],
-                         pool: Optional[List[Dict]] = None) -> str:
+
+                        pdf_contexts: Dict[str, List[Dict]],
+                        pool: Optional[List[Dict]] = None) -> str:
         hyp_text = "\n".join(
             f"{h.layer}. {h.diagnosis} (prob={h.probability:.0%}, sev={h.severity}, urg={h.urgency}, "
             f"compat={h.compatibility:.0%}, excl={h.exclusion_strength:.0%})"
@@ -261,7 +305,7 @@ class DMEEngine:
             pdf_blocks += f"\n--- {book} ---\n"
             for c in grouped[book][:9]:
                 pdf_blocks += (f"\n[{book} p.{c['metadata'].get('page')}] "
-                               f"{c['text'][:550]}")
+                                f"{c['text'][:550]}")
             if len(grouped[book]) > 9:
                 pdf_blocks += f"\n[{book} +{len(grouped[book]) - 9} trechos validados]"
 
@@ -294,29 +338,37 @@ compatibilidade, exclusao):
 EVIDENCIA VALIDADA NOS TRATADOS (fontes: {livros}):
 {pdf_blocks}
 
+COBERTURA OBRIGATORIA - 24 MODULOS DE ESPECIALIDADE:
+{_modulos_24()}
+
+Antes de responder, identifique quais modulos estao em jogo e detalhe
+explicitamente os que forem relevantes. Se a queixa se enquadrar em um modulo
+que voce nao detailingou, o raciocinio esta incompleto. Em caso de ambiguidade
+de enquadramento, considere mais de um modulo.
+
 PIPELINE OBRIGATORIO - execute nesta ordem, sem pular etapas:
 
 1. CARACTERIZACAO CLINICA da queixa e do contexto.
 2. REFINAR as hipoteses: recalcule probabilidade, gravidade e urgencia.
 3. IDENTIFICAR OS QUE NAO PODEM SER PERDIDOS (camada C), incluindo as
-   obstetricas: ectopic, DPP, placenta previa, pre-eclampsia com sinais de
-   gravidade, eclampsia, HELLP, hemorragia, sepse materna, rotura uterina,
-   sofrimento fetal. E as ginecologicas: torsao anexial, ectopic,
-   hemorragia significativa, infeccao pelvica grave, sepse, abdomen agudo.
+    obstetricas: ectopic, DPP, placenta previa, pre-eclampsia com sinais de
+    gravidade, eclampsia, HELLP, hemorragia, sepse materna, rotura uterina,
+    sofrimento fetal. E as ginecologicas: torsao anexial, ectopic,
+    hemorragia significativa, infeccao pelvica grave, sepse, abdomen agudo.
 4. DIFERENCIAIS POR SISTEMA (ginecologico, obstetrico, GI, urinario,
-   vascular, endocrinologico, hematologico) com mimetizadores.
+    vascular, endocrinologico, hematologico) com mimetizadores.
 5. MATRIZ DE DISCRIMINACAO para cada hipotese relevante (A+B+C).
 6. EXAMES DISCRIMINATORIOS com limitacoes: falso-negativo, janela clinica,
-   sensibilidade, especificidade, qualidade do exame, probabilidade pre-teste.
-   "Exame negativo" NAO e igual a "diagnostico excluido".
+    sensibilidade, especificidade, qualidade do exame, probabilidade pre-teste.
+    "Exame negativo" NAO e igual a "diagnostico excluido".
 7. REAVALIACAO: incorpore todo novo dado. Hipótese sobe, desce, permanece
-   ou e descartada. Repita o ciclo.
+    ou e descartada. Repita o ciclo.
 8. SAFETY CHECK explicito.
 9. ANTI-ANCORAGEM: identifique premissas como "e so infeccao", "e apenas
-   sangramento menstrual", "a ultrassonografia veio normal", "o beta-hCG
-   esta baixo entao nao e ectopic", "ela tem HAS entao a cefaleia e da HAS".
-   Para cada uma, pergunte: existe outra hipotese que explique melhor o
-   conjunto? Qual diagnostico perigoso ainda nao foi excluido?
+    sangramento menstrual", "a ultrassonografia veio normal", "o beta-hCG
+    esta baixo entao nao e ectopic", "ela tem HAS entao a cefaleia e da HAS".
+    Para cada uma, pergunte: existe outra hipotese que explique melhor o
+    conjunto? Qual diagnostico perigoso ainda nao foi excluido?
 10. CONDUTA + FOLLOW-UP.
 
 VOCE NAO E UM CALCULADOR DIAGNOSTICO. Os valores internos servem para
@@ -391,10 +443,10 @@ REGRAS INEGOCIÁVEIS:
 - Baseie-se APENAS na evidencia validada acima. Nao invente.
 - Cite livro e pagina em cada afirmacao relevante.
 - Se a evidencia for insuficiente, escreva "nos trechos validados nao
-  encontrei esta informacao" em vez de preencher com suposicao.
+encontrei esta informacao" em vez de preencher com suposicao.
 - Destaque com ⚠️ tudo que nao pode ser perdido.
 - Nao prescreva sem qualificar: e suporte ao raciocinio clinico do
-  profissional, que confirma a conduta.
+profissional, que confirma a conduta.
 """
 
     def generate_initial_hypotheses(self, context: ClinicalContext) -> List[Hypothesis]:
@@ -408,11 +460,11 @@ Responda SOMENTE com JSON valido, sem texto em volta, sem markdown.
 
 Formato OBRATORIO:
 {"hypotheses": [{"diagnosis": "nome clinico", "probability": 0.5,
-  "severity": 3, "urgency": 3, "system": "sistema",
-  "layer": "A", "favoring": ["..."], "against": ["..."], "missing": ["..."],
-  "best_test": "exame", "test_limitations": "limitacao",
-  "confirmatory_finding": "achado", "excluding_finding": "achado",
-  "next_step": "passo"}]}
+"severity": 3, "urgency": 3, "system": "sistema",
+"layer": "A", "favoring": ["..."], "against": ["..."], "missing": ["..."],
+"best_test": "exame", "test_limitations": "limitacao",
+"confirmatory_finding": "achado", "excluding_finding": "achado",
+"next_step": "passo"}]}
 
 Camadas: A = mais compativel, B = diferencial relevante,
 C = nao pode ser perdida, D = mimetizador."""
@@ -480,7 +532,7 @@ JSON:"""
 
         if isinstance(data, dict):
             items = (data.get("hypotheses") or data.get("diagnoses")
-                     or data.get("differential") or data.get("hipoteses") or [])
+                    or data.get("differential") or data.get("hipoteses") or [])
         elif isinstance(data, list):
             items = data
         else:
@@ -566,7 +618,7 @@ JSON:"""
         for q in queries[:6]:
             for c in self.hybrid_search(q, k=8, max_dist=0.68):
                 key = (c["metadata"].get("book"), c["metadata"].get("page"),
-                       c["text"][:80])
+                        c["text"][:80])
                 if key not in seen:
                     seen.add(key)
                     pool.append(c)
@@ -580,7 +632,7 @@ JSON:"""
 
         # 4. Prompt DME completo
         prompt = self.build_dme_prompt(context, hypotheses, pdf_contexts,
-                                       pool=validated)
+                                        pool=validated)
 
         # 5. Resposta final DME
         return self._chat(
