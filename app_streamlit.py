@@ -22,7 +22,7 @@ if "ready" not in st.session_state:
 
 if not st.session_state.ready:
     st.warning("Clique para carregar a base de dados.")
-    if st.button("Carregar base / Indexar PDFs"):
+    if st.button("Carregar base"):
         st.session_state.ready = True
         st.rerun()
     st.stop()
@@ -31,7 +31,6 @@ if not st.session_state.ready:
 try:
     import chromadb
     from groq import Groq
-    import pdfplumber
 except Exception as e:
     st.error(f"Import error: {e}")
     st.code(traceback.format_exc())
@@ -41,45 +40,14 @@ except Exception as e:
 @st.cache_resource
 def get_collection():
     client = chromadb.PersistentClient(path=str(DB_DIR))
-    try:
-        col = client.get_collection(name=COLLECTION_NAME)
-        if col.count() > 0:
-            return col
-    except Exception:
-        pass
-
     col = client.get_or_create_collection(
         name=COLLECTION_NAME,
         metadata={"hnsw:space": "cosine"}
     )
-
-    st.info("Indexando PDFs (pode levar varios minutos)...")
-    total = 0
-    for pdf_file in sorted(PDF_DIR.glob("*.pdf")):
-        book_label = "FEBRASGO" if "FEBRASGO" in pdf_file.name else "Williams"
-        with pdfplumber.open(pdf_file) as pdf:
-            batch_ids, batch_docs, batch_metas = [], [], []
-            for pn, page in enumerate(pdf.pages, 1):
-                text = page.extract_text()
-                if not text or len(text.strip()) < 50:
-                    continue
-                words = text.split()
-                for i in range(0, len(words), 800):
-                    chunk = " ".join(words[i:i + 800])
-                    if len(chunk.strip()) <= 100:
-                        continue
-                    batch_ids.append(f"{book_label}_{pn}_{len(batch_ids)}")
-                    batch_docs.append(chunk.strip())
-                    batch_metas.append({"source": pdf_file.stem, "page": pn, "book": book_label})
-                if len(batch_docs) >= 64:
-                    col.add(ids=batch_ids, documents=batch_docs, metadatas=batch_metas)
-                    total += len(batch_ids)
-                    batch_ids, batch_docs, batch_metas = [], [], []
-                    st.write(f"Indexados: {total} chunks...")
-            if batch_docs:
-                col.add(ids=batch_ids, documents=batch_docs, metadatas=batch_metas)
-                total += len(batch_ids)
-        st.write(f"Concluido: {pdf_file.name} ({total} chunks)")
+    if col.count() == 0:
+        raise RuntimeError(
+            "Base vazia. Rode 'python index_local.py' no PC e envie o chroma_db para o GitHub."
+        )
     return col
 
 
