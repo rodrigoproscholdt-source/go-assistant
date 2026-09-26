@@ -193,6 +193,7 @@ Se uma secao nao tiver respaldo nos trechos, escreva "Nos trechos validados nao 
 
 Redija em Markdown com EXATAMENTE estas secoes:
 
+## Resposta ao questionamento
 ## Definicao
 ## Fisiopatologia
 ## Clinica (sinais e sintomas)
@@ -200,12 +201,14 @@ Redija em Markdown com EXATAMENTE estas secoes:
 ## Investigacao (exames)
 ## Hipoteses diagnosticas
 ## Diagnosticos diferenciais
+## Conduta / Tratamento
 
 Regras:
-- Portugues claro, em topicos quando couber.
-- Cite (Livro, p. X) ao final de cada informacao relevante.
-- Termine com "### Fontes consultadas" listando livro e pagina unicos.
+- Em "Resposta ao questionamento", responda DIRETAMENTE o que foi perguntado
+  (ex.: tratamento, dose, conduta), com topicos, citando (Livro, p. X).
+- As demais secoes seguem o mesmo padrao; pule para "nao encontrei" se nao houver respaldo.
 - Nao invente informacao fora dos trechos.
+- Termine com "### Fontes consultadas" listando livro e pagina unicos.
 
 === SUGESTAO DE FONTES POR SECAO ===
 {sec_lines}
