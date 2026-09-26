@@ -1,9 +1,12 @@
 import os
+import traceback
 import streamlit as st
 from pathlib import Path
 import chromadb
 from chromadb.utils import embedding_functions
 from groq import Groq
+
+st.set_page_config(page_title="Assistente GO", page_icon="🏥", layout="wide")
 
 PDF_DIR = Path(__file__).parent
 DB_DIR = Path(__file__).parent / "chroma_db"
@@ -31,11 +34,9 @@ def get_collection():
     except Exception:
         pass
 
-    st.info("Indexando PDFs pela primeira vez (5-15 min)...")
+    import pdfplumber
     all_chunks = []
-    for pdf_file in PDF_DIR.glob("*.pdf"):
-        st.write(f"Processando {pdf_file.name}...")
-        import pdfplumber
+    for pdf_file in sorted(PDF_DIR.glob("*.pdf")):
         with pdfplumber.open(pdf_file) as pdf:
             book_name = pdf_file.stem
             book_label = "FEBRASGO" if "FEBRASGO" in book_name else "Williams"
@@ -52,7 +53,6 @@ def get_collection():
                             "metadata": {"source": book_name, "page": page_num, "book": book_label}
                         })
 
-    st.write(f"Indexando {len(all_chunks)} chunks...")
     collection = client.get_or_create_collection(
         name=COLLECTION_NAME,
         embedding_function=emb_fn,
@@ -65,22 +65,17 @@ def get_collection():
             documents=[c["text"] for c in all_chunks[i:i+100]],
             metadatas=[c["metadata"] for c in all_chunks[i:i+100]]
         )
-    st.success(f"Indexação completa: {collection.count()} chunks")
     return collection
 
 
-def search_context(collection, query: str, top_k: int = TOP_K) -> list[dict]:
+def search_context(collection, query, top_k=TOP_K):
     results = collection.query(
         query_texts=[query],
         n_results=top_k,
         include=["documents", "metadatas", "distances"]
     )
     return [
-        {
-            "text": doc,
-            "metadata": meta,
-            "score": 1 - dist
-        }
+        {"text": doc, "metadata": meta, "score": 1 - dist}
         for doc, meta, dist in zip(
             results["documents"][0],
             results["metadatas"][0],
@@ -89,21 +84,18 @@ def search_context(collection, query: str, top_k: int = TOP_K) -> list[dict]:
     ]
 
 
-def build_prompt(query: str, contexts: list[dict]) -> str:
-    context_blocks = []
+def build_prompt(query, contexts):
+    blocks = []
     for i, ctx in enumerate(contexts, 1):
-        meta = ctx["metadata"]
-        context_blocks.append(
-            f"[Fonte {i}: {meta['book']} - Página {meta['page']}]\n{ctx['text']}"
-        )
-    context_str = "\n\n---\n\n".join(context_blocks)
-    return f"""Você é um assistente especializado em Ginecologia e Obstetrícia.
-Use APENAS as informações dos trechos abaixo (Tratado FEBRASGO e Williams) para responder.
-Cite sempre a fonte (FEBRASGO ou Williams) e a página.
-Se a informação não estiver nos trechos, diga: "Não encontrei essa informação nos tratados disponíveis."
+        m = ctx["metadata"]
+        blocks.append(f"[Fonte {i}: {m['book']} - Pagina {m['page']}]\n{ctx['text']}")
+    return f"""Voce e um assistente especializado em Ginecologia e Obstetrica.
+Use APENAS as informacoes dos trechos abaixo (Tratado FEBRASGO e Williams) para responder.
+Cite sempre a fonte (FEBRASGO ou Williams) e a pagina.
+Se a informacao nao estiver nos trechos, diga: "Nao encontrei essa informacao nos tratados disponiveis."
 
 === TRECHOS DOS LIVROS ===
-{context_str}
+{chr(10).join(blocks)}
 
 === PERGUNTA ===
 {query}
@@ -112,12 +104,12 @@ Se a informação não estiver nos trechos, diga: "Não encontrei essa informaç
 """
 
 
-def ask_groq(prompt: str) -> str:
+def ask_groq(prompt):
     client = Groq(api_key=GROQ_API_KEY)
     resp = client.chat.completions.create(
         model=GROQ_MODEL,
         messages=[
-            {"role": "system", "content": "Você é um médico especialista em GO. Responda em português, cite fontes."},
+            {"role": "system", "content": "Voce e um medico especialista em GO. Responda em portugues, cite fontes."},
             {"role": "user", "content": prompt}
         ],
         temperature=0.2,
@@ -126,9 +118,8 @@ def ask_groq(prompt: str) -> str:
     return resp.choices[0].message.content
 
 
-st.set_page_config(page_title="Assistente GO", page_icon="🏥", layout="wide")
-st.title("🏥 Assistente Ginecologia/Obstetrícia")
-st.caption("Baseado no Tratado FEBRASGO + Williams Obstetrics — via Groq (Llama-3.1-70B) + RAG")
+st.title("Assistente Ginecologia/Obstetrica")
+st.caption("Tratado FEBRASGO + Williams Obstetrics - Groq Llama-3.1-70B + RAG")
 
 if "messages" not in st.session_state:
     st.session_state.messages = []
@@ -137,22 +128,18 @@ try:
     collection = get_collection()
     st.sidebar.success(f"Base carregada: {collection.count()} chunks")
 except Exception as e:
-    import traceback
     st.sidebar.error(f"Erro ao carregar base: {e}")
     st.sidebar.code(traceback.format_exc())
     st.stop()
 
 with st.sidebar:
     st.markdown("---")
-    st.markdown("### 📚 Fontes")
-    st.markdown("- **Tratado de Ginecologia da FEBRASGO**")
-    st.markdown("- **Williams Obstetrics (Ginecologia de Williams)**")
+    st.markdown("### Fontes")
+    st.markdown("- Tratado de Ginecologia da FEBRASGO")
+    st.markdown("- Williams Obstetrics (Ginecologia de Williams)")
     st.markdown("---")
-    st.markdown("### ⚙️ Config")
-    st.markdown(f"- Modelo: `{GROQ_MODEL}`")
-    st.markdown(f"- Top-K: `{TOP_K}`")
-    st.markdown(f"- Embeddings: `paraphrase-multilingual-MiniLM-L12-v2`")
-    if st.button("🗑️ Limpar histórico"):
+    st.markdown(f"Modelo: `{GROQ_MODEL}`")
+    if st.button("Limpar historico"):
         st.session_state.messages = []
         st.rerun()
 
@@ -160,26 +147,28 @@ for msg in st.session_state.messages:
     with st.chat_message(msg["role"]):
         st.markdown(msg["content"])
 
-if prompt := st.chat_input("Pergunte sobre GO (ex: critérios de pré-eclâmpsia, conduta em abortamento...)"):
+if prompt := st.chat_input("Pergunte sobre GO (ex: criterios de pre-eclampsia...)"):
     st.session_state.messages.append({"role": "user", "content": prompt})
     with st.chat_message("user"):
         st.markdown(prompt)
 
     with st.chat_message("assistant"):
-        with st.spinner("Buscando nos tratados..."):
+        try:
             contexts = search_context(collection, prompt)
-        if not contexts:
-            answer = "Não encontrei trechos relevantes nos tratados para essa pergunta."
-        else:
-            with st.spinner("Gerando resposta..."):
-                prompt_built = build_prompt(prompt, contexts)
-                answer = ask_groq(prompt_built)
-        st.markdown(answer)
-        if contexts:
-            with st.expander("📖 Fontes utilizadas"):
-                for i, ctx in enumerate(contexts, 1):
-                    m = ctx["metadata"]
-                    st.markdown(f"**{i}. {m['book']}** — Página {m['page']} (relevância: {ctx['score']:.3f})")
-                    st.caption(ctx["text"][:300] + "...")
+            if not contexts:
+                answer = "Nao encontrei trechos relevantes nos tratados."
+            else:
+                answer = ask_groq(build_prompt(prompt, contexts))
+            st.markdown(answer)
+            if contexts:
+                with st.expander("Fontes utilizadas"):
+                    for i, ctx in enumerate(contexts, 1):
+                        m = ctx["metadata"]
+                        st.markdown(f"**{i}. {m['book']}** - Pagina {m['page']} (relevancia: {ctx['score']:.3f})")
+                        st.caption(ctx["text"][:300] + "...")
+        except Exception as e:
+            answer = f"Erro: {e}"
+            st.error(answer)
+            st.code(traceback.format_exc())
 
     st.session_state.messages.append({"role": "assistant", "content": answer})
