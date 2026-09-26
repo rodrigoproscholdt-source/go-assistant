@@ -14,6 +14,7 @@ import time
 import hashlib
 import logging
 import unicodedata
+from datetime import date
 from pathlib import Path
 from typing import List, Dict, Any, Optional
 from dataclasses import dataclass, asdict
@@ -342,6 +343,8 @@ class ClinicalContext:
     amenorrhea_days: Optional[int] = None
     fetal_viability: str = ""
     multiples: str = ""
+    # "" (nao enderecada) | "informada" | "desconhecida"
+    gestacao_info: str = ""
 
 
 MODULOS_24 = [
@@ -897,10 +900,19 @@ JSON:"""
         faltando = []
         if context.age is None:
             faltando.append("Idade da paciente")
-        if context.pregnancy_status == "incerta" and not context.gestational_age_weeks:
-            faltando.append("Data da última menstruação ou resultado de β-hCG")
-        if context.is_pregnant and context.gestational_age_weeks is None:
-            faltando.append("Idade gestacional (semanas)")
+        if (context.pregnancy_status == "incerta"
+                and not context.gestational_age_weeks
+                and context.gestacao_info != "desconhecida"):
+            faltando.append(
+                "Data da última menstruação ou resultado de β-hCG "
+                "(se não souber, digite 'não sei' que sigo mesmo assim)"
+            )
+        if (context.is_pregnant and context.gestational_age_weeks is None
+                and context.gestacao_info != "desconhecida"):
+            faltando.append(
+                "Idade gestacional (semanas) "
+                "(se não souber, digite 'não sei' que sigo mesmo assim)"
+            )
         if not context.complaint or len(context.complaint.split()) < 3:
             faltando.append("Descrição do motivo da consulta (sintomas, duração, evolução)")
         return faltando
@@ -910,10 +922,14 @@ JSON:"""
         query = f"{context.complaint} {modulo}"
         return self.hybrid_search(query, k=k, max_dist=0.68)
 
-    def run_dme(self, context: ClinicalContext) -> str:
-        """Pipeline completo DME. Retorna JSON se precisar de esclarecimento."""
+    def run_dme(self, context: ClinicalContext, forcar: bool = False) -> str:
+        """Pipeline completo DME. Retorna JSON se precisar de esclarecimento.
+
+        forcar=True pula o gate de contexto minimo (ja perguntou 2x - analisa
+        mesmo com dado faltante, mantendo a incerteza declarada no prompt).
+        """
         # 0. Checa contexto mínimo antes de qualquer processamento
-        faltando = self._checar_contexto_minimo(context)
+        faltando = [] if forcar else self._checar_contexto_minimo(context)
         if faltando:
             import json
             return json.dumps({
@@ -1007,30 +1023,65 @@ def _first_json_object(txt: str) -> str:
 
 _AMENORRHEA = re.compile(
     r"(falta\s+de\s+menstrua|amenorre|nao\s+menstrua|sem\s+menstrua"
-    r"|atraso\s+menstru|menstrua\w*\s+(?:ha|à)\s+\d)"
+    r"|atraso\s+menstru|menstrua\w*\s+(?:ha|à)\s+\d"
+    r"|\bam\s*[:\-]?\s*\d{1,3}\s*(?:sem|dia))"
 )
 _GESTANTE = re.compile(
-    r"\b(gestante|gesta[çc][ãa]o|gr[aá]vida|grav[aá]vida|"
+    r"\b(gestante|gesta[çc][ãa]o|gr[aá]vida|grav[aá]vida|gest\s*\.|"
     r"\bde\s+\d+\s+semanas\s+de\s+gesta|com\s+\d+\s+semanas)\b"
 )
 
+# Abreviacoes clinicas de GO. A expansao e APPENDADA (original preservada):
+# melhora a busca hibrida (BM25 acha termo completo) e o prompt para o LLM.
+ABREVIACOES_GO = [
+    (r"\bfid\b", "fossa iliaca direita"),
+    (r"\bfie\b", "fossa iliaca esquerda"),
+    (r"\bcefa\b", "cefaleia"),
+    (r"\bn\s*/\s*v\b", "nauseas e vomitos"),
+    (r"\busgtv\b", "ultrassonografia transvaginal"),
+    (r"\busg\b", "ultrassonografia"),
+    (r"\bdum\b", "data da ultima menstruacao"),
+    (r"\bdpp\b", "data provavel do parto"),
+    (r"\bdue\b", "data da ultima ecografia"),
+    (r"\bdmg\b", "diabetes mellitus gestacional"),
+    (r"\bdm\s*(?:tipo\s*)?2\b", "diabetes mellitus tipo 2"),
+    (r"\bdm\b", "diabetes mellitus"),
+    (r"\bhas\b", "hipertensao arterial"),
+    (r"\bpe\b", "pre-eclampsia"),
+    (r"\bta\s*\d{2,3}\s*/\s*\d{2,3}", "tensao arterial"),
+    (r"\bfc\b", "frequencia cardiaca"),
+    (r"\btvd\b|tvs\b", "ultrassonografia transvaginal"),
+    (r"\bdpi\b", "diagnostico pre-natal"),
+]
+
+
+def _expandir_abreviacoes(text: str) -> str:
+    """Appenda significado por extenso as abreviacoes (original preservada)."""
+    out = text
+    for padrao, exp in ABREVIACOES_GO:
+        out = re.sub(padrao, lambda m, e=exp: f"{m.group(0)} ({e})",
+                     out, flags=re.IGNORECASE)
+    return out
+
 
 def parse_clinical_input(text: str) -> ClinicalContext:
-    """Extrai idade, IG, G/P e situacao gestacional.
+    """Extrai idade, IG, G/P, DPP, beta-hCG e situacao gestacional.
 
     Cuidado clinico: 'falta de menstruacao ha 4 semanas' NAO e 'gestante de
-    4 semanas'. Sao situacoes opostas - a primeira suggests amenorreia, a
-    segunda uma gestacao，年轻. Por isso nao assumimos gestacao por causa da
-    palavra 'semanas' isolada.
+    4 semanas'. Sao situacoes opostas - a primeira indica amenorreia, a
+    segunda uma gestacao confirmada. Por isso nao assumimos gestacao por
+    causa da palavra 'semanas' isolada.
     """
-    ctx = ClinicalContext(complaint=text)
+    ctx = ClinicalContext(complaint=_expandir_abreviacoes(text))
     low = _strip_accents(text.lower())
 
     m_age = re.search(r"(\d{1,2})\s*anos?", low)
     if m_age:
         ctx.age = int(m_age.group(1))
 
-    m_gp = re.search(r"\bg\s*(\d)\s*p\s*(\d)\b", low)
+    # G/P com abortos e cesareas: 'G3P1A1', 'G2P1', 'G3P2C1A0'
+    m_gp = re.search(r"\bg\s*(\d+)\s*p\s*(\d+)"
+                     r"(?:\s*a\s*(\d+))?(?:\s*c\s*(\d+))?(?!\d)", low)
     if m_gp:
         ctx.gravida, ctx.para = int(m_gp.group(1)), int(m_gp.group(2))
 
@@ -1041,6 +1092,8 @@ def parse_clinical_input(text: str) -> ClinicalContext:
     m_ig = None
     for padrao in (
         r"\big\s*(?:de)?\s*:?\s*(\d{1,2})\s*(?:sem|s\b)",
+        r"\big\s*(?:de)?\s*:?\s*(\d{1,2})\s*[/]\s*\d\b",
+        r"(\d{1,2})\s*sg\b",
         r"(\d{1,2})\s*sem(?:anas)?\s+de\s+gesta",
         r"gesta\w*\s+(?:de|com)\s+(\d{1,2})\s*sem",
         r"gestante\s+(\d{1,2})\s*sem",
@@ -1067,7 +1120,9 @@ def parse_clinical_input(text: str) -> ClinicalContext:
                 ctx.amenorrhea_days = n * 30
 
     # --- 2b. 'N semanas' isolado quando ha G/P (ex: 'G2P1 32 semanas') ---
-    if not m_ig and m_gp:
+    # NUNCA quando ha linguagem de amenorreia: 'G3P1 amenorreia ha 6
+    # semanas' quer dizer 6 semanas SEM menstruar, nao IG 6.
+    if not m_ig and m_gp and not tem_amenorreia:
         m_bare = re.search(r"(\d{1,2})\s*sem(?:anas)?\b", low)
         if m_bare:
             m_ig = int(m_bare.group(1))
@@ -1079,10 +1134,35 @@ def parse_clinical_input(text: str) -> ClinicalContext:
     if ctx.gestational_age_weeks:
         ctx.is_pregnant = True
 
-    # --- 3. 'atraso/amenorreia de N semanas' ---
+    # --- 2c. DPP (data provavel do parto) -> IG calculada ---
+    if not ctx.gestational_age_weeks:
+        m_dpp = re.search(r"\bdpp\s*[:\-]?\s*(\d{1,2})[/-](\d{1,2})"
+                          r"(?:[/-](\d{2,4}))?", low)
+        if m_dpp:
+            dia, mes = int(m_dpp.group(1)), int(m_dpp.group(2))
+            anos = m_dpp.group(3)
+            hoje = date.today()
+            if anos:
+                a = int(anos)
+                candidatos = [a + 2000 if a < 100 else a]
+            else:
+                candidatos = [hoje.year - 1, hoje.year, hoje.year + 1]
+            for a in candidatos:
+                try:
+                    dpp = date(a, mes, dia)
+                except ValueError:
+                    continue
+                ig = 40 - (dpp - hoje).days / 7
+                if 1 <= ig <= 45:
+                    ctx.gestational_age_weeks = int(ig)
+                    ctx.is_pregnant = True
+                    ctx.gestacao_info = "informada"
+                    break
+
+    # --- 3. 'atraso/amenorreia/AM de N semanas' ---
     if not ctx.amenorrhea_weeks and not ctx.amenorrhea_days:
         m_am = re.search(
-            r"(?:atraso\s+menstru\w*|amenorre\w*|falta\s+de\s+menstru\w*)"
+            r"(?:atraso\s+menstru\w*|amenorre\w*|falta\s+de\s+menstru\w*|\bam)"
             r"[^.\d]{0,12}?(\d{1,3})\s*(sem|dias|m[eê]s)", low)
         if m_am:
             n, un = int(m_am.group(1)), m_am.group(2)
@@ -1100,6 +1180,43 @@ def parse_clinical_input(text: str) -> ClinicalContext:
     # e INCERTA. Marcamos para o DME perguntar em vez de assumir.
     if tem_amenorreia and not ctx.gestational_age_weeks:
         ctx.pregnancy_status = "incerta"
+
+    # --- 4. Resposta sobre DUM / beta-hCG (resolve o loop de esclarecimento) ---
+    if re.search(r"(dum|beta|hcg|menstrua|gestac|nao\s+(?:sei|recorda|"
+                 r"lembra|sabe|fez|realizou))", low):
+        for fr in re.split(r"[.;!\n]+", low):
+            if not re.search(r"(dum|menstrua|beta|hcg|gestac|data)", fr):
+                continue
+            if (re.search(r"(nao|nunca)\s+(sei|recorda|lembra|sabe|fez|"
+                          r"realizou|informa|conhece|tem|soube)", fr)
+                    or re.search(r"(desconhecid|ignorad)", fr)):
+                ctx.gestacao_info = "desconhecida"
+                break
+            if (re.search(r"\bdum\s*[:\-]?\s*\d", fr)
+                    or re.search(r"\b\d{1,2}[/-]\d{1,2}\b", fr)
+                    or re.search(r"(beta|hcg)\s*(positiv|negativ|\d)", fr)
+                    or re.search(r"ultima menstrua\w*\s+(em|dia|data)", fr)):
+                ctx.gestacao_info = "informada"
+                break
+
+    # --- 5. beta-hCG: valor numerico e/ou resultado positivo/negativo ---
+    m_bv = re.search(
+        r"(?:beta[\s-]?h?cg|bhcg|β[\s-]?h?cg|\bhcg)"
+        r"\s*(?:de|em|:|-)?\s*(\d+(?:[.,]\d+)?)", low)
+    if m_bv:
+        try:
+            ctx.labs = dict(ctx.labs) if ctx.labs else {}
+            ctx.labs["bhcg"] = float(m_bv.group(1).replace(",", "."))
+            ctx.gestacao_info = "informada"
+        except ValueError:
+            pass
+    m_br = re.search(r"(?:beta|bhcg|β|hcg)[\w\s-]{0,15}?(positiv|negativ)",
+                     low)
+    if m_br:
+        ctx.gestacao_info = "informada"
+        if m_br.group(1).startswith("positiv"):
+            ctx.is_pregnant = True
+            ctx.pregnancy_status = "confirmada"
 
     return ctx
 
@@ -1129,6 +1246,13 @@ def _pregnancy_block(ctx: "ClinicalContext") -> str:
         parts.append(f"amenorreia ha {ctx.amenorrhea_weeks} semanas")
     elif ctx.amenorrhea_days:
         parts.append(f"amenorreia ha {ctx.amenorrhea_days} dias")
+    if ctx.gestacao_info == "desconhecida":
+        parts.append(
+            "DUM desconhecida e beta-hCG NAO realizado - paciente nao soube "
+            "informar; manter ectopica e TPP em aberto ate confirmacao"
+        )
+    elif ctx.gestacao_info == "informada" and status == "incerta":
+        parts.append("DUM/beta-hCG informados nos dados acima")
     if ctx.multiples:
         parts.append(f"gestacao {ctx.multiples}")
     if ctx.fetal_viability:

@@ -98,6 +98,9 @@ if "messages" not in st.session_state:
 if "aguardando_esclarecimento" not in st.session_state:
     st.session_state.aguardando_esclarecimento = None
 
+if "esclarec_tentativas" not in st.session_state:
+    st.session_state.esclarec_tentativas = 0
+
 # Inicializado aqui para que NUNCA exista NameError, mesmo se o bloco de
 # chat for interrompido por excecao ou por uma versao antiga em cache.
 answer = "Nao foi possivel completar a analise. Tente novamente."
@@ -105,6 +108,7 @@ answer = "Nao foi possivel completar a analise. Tente novamente."
 if st.sidebar.button("Limpar historico"):
     st.session_state.messages = []
     st.session_state.aguardando_esclarecimento = None
+    st.session_state.esclarec_tentativas = 0
     st.rerun()
 
 def _extract_pdf_text(file) -> str:
@@ -229,8 +233,11 @@ if prompt := st.chat_input("Descreva o caso clinico (ou use /comando)..."):
             else:
                 ctx = parse_clinical_input(entrada)
 
+            # Maximo 2 rodadas de esclarecimento: depois disso analisa
+            # mesmo com dado faltante (incerteza declarada no prompt).
+            forcar = st.session_state.esclarec_tentativas >= 2
             with st.spinner("Executando Differential Matrix Engine..."):
-                resposta_raw = dme.run_dme(ctx)
+                resposta_raw = dme.run_dme(ctx, forcar=forcar)
 
             # Verifica se o DME pediu esclarecimento
             try:
@@ -243,6 +250,7 @@ if prompt := st.chat_input("Descreva o caso clinico (ou use /comando)..."):
                         "idade": ctx.age,
                         "faltando": resposta_json["itens"]
                     }
+                    st.session_state.esclarec_tentativas += 1
                     # Mostra a pergunta ao usuario
                     msg = resposta_json["mensagem"] + "\n\n" + "\n".join(f"- {i}" for i in resposta_json["itens"])
                     st.markdown(msg)
@@ -250,11 +258,13 @@ if prompt := st.chat_input("Descreva o caso clinico (ou use /comando)..."):
                 else:
                     # Resposta normal do DME
                     st.session_state.aguardando_esclarecimento = None
+                    st.session_state.esclarec_tentativas = 0
                     st.markdown(resposta_raw)
                     answer = resposta_raw
             except (json.JSONDecodeError, TypeError):
                 # Nao e JSON de esclarecimento, trata como resposta normal
                 st.session_state.aguardando_esclarecimento = None
+                st.session_state.esclarec_tentativas = 0
                 st.markdown(resposta_raw)
                 answer = resposta_raw
 
