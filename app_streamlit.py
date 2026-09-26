@@ -128,16 +128,18 @@ def ask_groq(prompt: str) -> str:
 
 st.set_page_config(page_title="Assistente GO", page_icon="🏥", layout="wide")
 st.title("🏥 Assistente Ginecologia/Obstetrícia")
-st.caption("Baseado no Tratado FEBRASGO + Williams Obstetrics — via Groq (Llama-3.1-70B) + RAG local")
+st.caption("Baseado no Tratado FEBRASGO + Williams Obstetrics — via Groq (Llama-3.1-70B) + RAG")
 
 if "messages" not in st.session_state:
     st.session_state.messages = []
 
 try:
     collection = get_collection()
-    st.sidebar.success(f"✅ Base carregada: {collection.count()} chunks")
+    st.sidebar.success(f"Base carregada: {collection.count()} chunks")
 except Exception as e:
-    st.sidebar.error(f"❌ Erro ao carregar base: {e}")
+    import traceback
+    st.sidebar.error(f"Erro ao carregar base: {e}")
+    st.sidebar.code(traceback.format_exc())
     st.stop()
 
 with st.sidebar:
