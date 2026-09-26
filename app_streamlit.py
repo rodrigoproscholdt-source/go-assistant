@@ -5,13 +5,13 @@ from pathlib import Path
 
 st.set_page_config(page_title="Assistente GO", layout="wide")
 st.title("Assistente Ginecologia/Obstetrica")
-st.caption("Tratado FEBRASGO + Williams Obstetrics - Groq Llama-3.1-70B + RAG")
+st.caption("Tratado FEBRASGO + Williams Obstetrics - Groq gpt-oss-120b + RAG")
 
 PDF_DIR = Path(__file__).parent
 DB_DIR = Path(__file__).parent / "chroma_db"
 COLLECTION_NAME = "go_books"
 GROQ_MODEL = "openai/gpt-oss-120b"
-TOP_K = 5
+TOP_K = 8
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 
 st.sidebar.write(f"GROQ: {'OK' if GROQ_API_KEY else 'MISSING'}")
@@ -58,14 +58,43 @@ def search(collection, query):
             for d, m, dist in zip(r["documents"][0], r["metadatas"][0], r["distances"][0])]
 
 
+def search_multi(collection, query):
+    try:
+        g = Groq(api_key=GROQ_API_KEY)
+        rw = g.chat.completions.create(
+            model=GROQ_MODEL,
+            messages=[{"role": "user", "content":
+                       "Reescreva esta pergunta clinica em 3 consultas de busca curtas "
+                       "(sinonimos medicos em portugues e termo em ingles). "
+                       "Apenas as 3 linhas, sem numero:\n" + query}],
+            temperature=0.0, max_tokens=200,
+        )
+        variants = [query] + [l.strip("-* ").strip()
+                              for l in rw.choices[0].message.content.splitlines() if l.strip()]
+    except Exception:
+        variants = [query]
+
+    seen, ctxs = set(), []
+    for v in variants[:4]:
+        for c in search(collection, v):
+            key = (c["metadata"]["book"], c["metadata"]["page"], c["text"][:80])
+            if key not in seen:
+                seen.add(key)
+                ctxs.append(c)
+    ctxs.sort(key=lambda c: c["score"], reverse=True)
+    return ctxs[:TOP_K]
+
+
 def build_prompt(query, ctxs):
     blocks = "\n\n".join(
         f"[Fonte {i}: {c['metadata']['book']} - Pagina {c['metadata']['page']}]\n{c['text']}"
         for i, c in enumerate(ctxs, 1)
     )
     return f"""Voce e especialista em Ginecologia e Obstetrica.
-Use APENAS os trechos abaixo (FEBRASGO e Williams). Cite fonte e pagina.
-Se nao encontrar, diga: "Nao encontrei nos tratados disponiveis."
+Use os trechos abaixo (FEBRASGO e Williams) como fonte principal e cite livro e pagina.
+Se os trechos ajudarem mesmo que parcialmente, responda com base neles.
+So diga "Nao encontrei nos tratados disponiveis" se NENHUM trecho for util.
+Responda em portugues, de forma direta e objetiva (lista quando apropriado).
 
 === TRECHOS ===
 {blocks}
@@ -116,7 +145,7 @@ if prompt := st.chat_input("Pergunte sobre GO..."):
 
     with st.chat_message("assistant"):
         try:
-            ctxs = search(collection, prompt)
+            ctxs = search_multi(collection, prompt)
             if not ctxs:
                 answer = "Nao encontrei trechos relevantes."
             else:
