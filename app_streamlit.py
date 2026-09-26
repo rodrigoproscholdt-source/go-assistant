@@ -10,7 +10,7 @@ st.caption("Tratado FEBRASGO + Williams Obstetrics - Groq Llama-3.1-70B + RAG")
 PDF_DIR = Path(__file__).parent
 DB_DIR = Path(__file__).parent / "chroma_db"
 COLLECTION_NAME = "go_books"
-GROQ_MODEL = "llama-3.1-70b-versatile"
+GROQ_MODEL = "openai/gpt-oss-120b"
 TOP_K = 5
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 
