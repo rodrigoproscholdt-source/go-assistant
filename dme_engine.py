@@ -10,18 +10,278 @@ BUILD = "dme-v1.0-mod24"
 import os
 import re
 import json
+import time
+import hashlib
+import logging
 import unicodedata
 from pathlib import Path
 from typing import List, Dict, Any, Optional
 from dataclasses import dataclass, asdict
-from groq import Groq
+from collections import OrderedDict
+from abc import ABC, abstractmethod
 import chromadb
 from rank_bm25 import BM25Okapi
+import httpx
+# ---- LLM PROVIDER SELECTION ------------------------------------------------
+# LLM_PROVIDER = "groq" | "ollama" | "llamafile"
+LLM_PROVIDER = os.getenv("LLM_PROVIDER", "groq").lower()
 
+# Groq config
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 GROQ_MODEL = "openai/gpt-oss-120b"
+
+# Ollama config
+OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
+OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "llama3.1:8b")
+
+# Llamafile config
+LLAMAFILE_BASE_URL = os.getenv("LLAMAFILE_BASE_URL", "http://localhost:8080/v1")
+LLAMAFILE_MODEL = os.getenv("LLAMAFILE_MODEL", "llama3.1-8b-instruct")
+
 MAX_DIST = 0.62
 TOP_K = 10
+
+# ---- FREE-TIER GUARDS (aplica-se a Groq) ----------------------------------
+GROQ_RPM_LIMIT = 30
+GROQ_TPM_LIMIT = 6000
+
+# Cache LRU em memoria (TTL 1h) - evita repetir chamadas identicas
+_CACHE_TTL = 3600
+_CACHE_MAX = 500
+_cache: "OrderedDict[str, tuple[float, str]]" = OrderedDict()
+
+# Token bucket para rate limit (Groq)
+_bucket_tokens = GROQ_RPM_LIMIT
+_bucket_last = time.time()
+
+# Contadores de custo (tokens)
+_total_prompt_tokens = 0
+_total_completion_tokens = 0
+_total_calls = 0
+
+# Logger JSON lines no stdout (gratis no Streamlit logs)
+_logger = logging.getLogger("dme")
+if not _logger.handlers:
+    _handler = logging.StreamHandler()
+    _handler.setFormatter(logging.Formatter("%(message)s"))
+    _logger.addHandler(_handler)
+    _logger.setLevel(logging.INFO)
+
+
+def _log(event: str, **kwargs):
+    payload = {"event": event, "build": BUILD, "ts": time.time(), **kwargs}
+    _logger.info(json.dumps(payload, ensure_ascii=False))
+
+
+def _cache_key(system, user, temperature, max_tokens):
+    h = hashlib.sha256()
+    h.update(system.encode())
+    h.update(b"|")
+    h.update(user.encode())
+    h.update(("|{}|{}".format(temperature, max_tokens)).encode())
+    return h.hexdigest()[:32]
+
+
+def _cache_get(key):
+    now = time.time()
+    if key in _cache:
+        ts, val = _cache[key]
+        if now - ts < _CACHE_TTL:
+            _cache.move_to_end(key)
+            return val
+        del _cache[key]
+    return None
+
+
+def _cache_set(key, value):
+    now = time.time()
+    _cache[key] = (now, value)
+    _cache.move_to_end(key)
+    while len(_cache) > _CACHE_MAX:
+        _cache.popitem(last=False)
+
+
+def _rate_limit_wait():
+    global _bucket_tokens, _bucket_last
+    now = time.time()
+    _bucket_tokens = min(GROQ_RPM_LIMIT, _bucket_tokens + (now - _bucket_last) * 0.5)
+    _bucket_last = now
+    if _bucket_tokens < 1:
+        wait = (1 - _bucket_tokens) / 0.5
+        time.sleep(wait)
+        _bucket_tokens = 0
+    else:
+        _bucket_tokens -= 1
+
+
+def _estimate_tokens(text):
+    return max(1, len(text) // 4)
+
+
+def _count_tokens(system, user):
+    return _estimate_tokens(system), _estimate_tokens(user)
+
+
+# ---- LLM PROVIDER ABSTRACTION ----------------------------------------------
+class LLMProvider(ABC):
+    @abstractmethod
+    def chat(self, system, user, temperature=0.0, max_tokens=6000):
+        pass
+
+    @abstractmethod
+    def is_available(self):
+        pass
+
+
+class GroqProvider(LLMProvider):
+    def __init__(self):
+        from groq import Groq
+        if not GROQ_API_KEY:
+            raise RuntimeError("GROQ_API_KEY nao definida")
+        self.client = Groq(api_key=GROQ_API_KEY)
+        self.model = GROQ_MODEL
+
+    def is_available(self):
+        return bool(GROQ_API_KEY)
+
+    def chat(self, system, user, temperature=0.0, max_tokens=6000):
+        global _total_prompt_tokens, _total_completion_tokens, _total_calls
+
+        key = _cache_key(system, user, temperature, max_tokens)
+        cached = _cache_get(key)
+        if cached:
+            _log("cache_hit", model=self.model, provider="groq")
+            return cached
+
+        _rate_limit_wait()
+
+        prompt_toks, _ = _count_tokens(system, user)
+        _total_prompt_tokens += prompt_toks
+        _total_calls += 1
+
+        last = ""
+        for attempt in range(3):
+            try:
+                resp = self.client.chat.completions.create(
+                    model=self.model,
+                    messages=[{"role": "system", "content": system},
+                              {"role": "user", "content": user}],
+                    temperature=temperature, max_tokens=max_tokens,
+                )
+                last = (resp.choices[0].message.content or "").strip()
+                if hasattr(resp, "usage") and resp.usage:
+                    _total_prompt_tokens += getattr(resp.usage, "prompt_tokens", 0)
+                    _total_completion_tokens += getattr(resp.usage, "completion_tokens", 0)
+            except Exception as e:
+                last = "__ERRO__ " + str(e)
+            if last and not last.startswith("__ERRO__"):
+                _cache_set(key, last)
+                _log("groq_ok", attempt=attempt+1, prompt_tokens=prompt_toks,
+                     cached=False, cached_size=len(_cache))
+                return last
+        _log("groq_fail", attempts=3, error=last[:200])
+        return last
+
+
+class OllamaProvider(LLMProvider):
+    def __init__(self):
+        self.base_url = OLLAMA_BASE_URL.rstrip("/")
+        self.model = OLLAMA_MODEL
+        self.client = httpx.Client(timeout=120.0)
+
+    def is_available(self):
+        try:
+            r = self.client.get(self.base_url + "/api/tags", timeout=5)
+            return r.status_code == 200
+        except Exception:
+            return False
+
+    def chat(self, system, user, temperature=0.0, max_tokens=6000):
+        key = _cache_key(system, user, temperature, max_tokens)
+        cached = _cache_get(key)
+        if cached:
+            _log("cache_hit", model=self.model, provider="ollama")
+            return cached
+
+        payload = {
+            "model": self.model,
+            "messages": [
+                {"role": "system", "content": system},
+                {"role": "user", "content": user}
+            ],
+            "temperature": temperature,
+            "num_predict": max_tokens,
+            "stream": False,
+        }
+        try:
+            r = self.client.post(self.base_url + "/api/chat", json=payload, timeout=120)
+            r.raise_for_status()
+            data = r.json()
+            last = data.get("message", {}).get("content", "").strip()
+        except Exception as e:
+            last = "__ERRO__ " + str(e)
+
+        if last and not last.startswith("__ERRO__"):
+            _cache_set(key, last)
+            _log("ollama_ok", model=self.model)
+            return last
+        _log("ollama_fail", error=last[:200])
+        return last
+
+
+class LlamafileProvider(LLMProvider):
+    def __init__(self):
+        self.base_url = LLAMAFILE_BASE_URL.rstrip("/")
+        self.model = LLAMAFILE_MODEL
+        self.client = httpx.Client(timeout=120.0)
+
+    def is_available(self):
+        try:
+            r = self.client.get(self.base_url + "/models", timeout=5)
+            return r.status_code == 200
+        except Exception:
+            return False
+
+    def chat(self, system, user, temperature=0.0, max_tokens=6000):
+        key = _cache_key(system, user, temperature, max_tokens)
+        cached = _cache_get(key)
+        if cached:
+            _log("cache_hit", model=self.model, provider="llamafile")
+            return cached
+
+        payload = {
+            "model": self.model,
+            "messages": [
+                {"role": "system", "content": system},
+                {"role": "user", "content": user}
+            ],
+            "temperature": temperature,
+            "max_tokens": max_tokens,
+            "stream": False,
+        }
+        try:
+            r = self.client.post(self.base_url + "/chat/completions", json=payload, timeout=120)
+            r.raise_for_status()
+            data = r.json()
+            last = data["choices"][0]["message"]["content"].strip()
+        except Exception as e:
+            last = "__ERRO__ " + str(e)
+
+        if last and not last.startswith("__ERRO__"):
+            _cache_set(key, last)
+            _log("llamafile_ok", model=self.model)
+            return last
+        _log("llamafile_fail", error=last[:200])
+        return last
+
+
+def _get_llm_provider():
+    if LLM_PROVIDER == "ollama":
+        return OllamaProvider()
+    if LLM_PROVIDER == "llamafile":
+        return LlamafileProvider()
+    return GroqProvider()
+
 
 BASE = Path(__file__).parent
 COLLECTION_NAME = "go_books"
@@ -124,7 +384,7 @@ def _modulos_24() -> str:
 class DMEEngine:
     def __init__(self, shard_dirs: Optional[Dict[str, Path]] = None):
         # Groq e criado sob demanda: permite testar a recuperacao sem chave
-        self._groq = None
+        self._llm = None
         print(f"[dme_engine] build={BUILD} carregado", flush=True)
         self._shard_dirs = shard_dirs
 
@@ -175,15 +435,15 @@ class DMEEngine:
             )
 
     @property
-    def groq(self) -> Groq:
-        if self._groq is None:
-            if not GROQ_API_KEY:
+    def llm(self) -> LLMProvider:
+        if self._llm is None:
+            self._llm = _get_llm_provider()
+            if not self._llm.is_available():
                 raise RuntimeError(
-                    "GROQ_API_KEY nao definida. No Streamlit Cloud configure em "
-                    "Settings > Secrets."
+                    "LLM provider '" + LLM_PROVIDER + "' nao disponivel. "
+                    "Verifique GROQ_API_KEY / OLLAMA_BASE_URL / LLAMAFILE_BASE_URL."
                 )
-            self._groq = Groq(api_key=GROQ_API_KEY)
-        return self._groq
+        return self._llm
 
     @property
     def books(self) -> List[str]:
@@ -245,22 +505,45 @@ class DMEEngine:
 
     def _chat(self, system: str, user: str, temperature: float = 0.0,
                 max_tokens: int = 6000, tries: int = 3) -> str:
-        """Chamada Groq com retry: o modelo as vezes devolve content vazio."""
+        """Chamada LLM via provider (Groq/Ollama/Llamafile) com cache."""
+        global _total_prompt_tokens, _total_completion_tokens, _total_calls
+
+        key = _cache_key(system, user, temperature, max_tokens)
+        cached = _cache_get(key)
+        if cached:
+            _log("cache_hit", provider=LLM_PROVIDER)
+            return cached
+
+        if LLM_PROVIDER == "groq":
+            _rate_limit_wait()
+
+        prompt_toks, _ = _count_tokens(system, user)
+        _total_prompt_tokens += prompt_toks
+        _total_calls += 1
+
         last = ""
         for attempt in range(tries):
             try:
-                resp = self.groq.chat.completions.create(
-                    model=GROQ_MODEL,
-                    messages=[{"role": "system", "content": system},
-                                {"role": "user", "content": user}],
-                    temperature=temperature, max_tokens=max_tokens,
-                )
-                last = (resp.choices[0].message.content or "").strip()
+                last = self.llm.chat(system, user, temperature, max_tokens)
             except Exception as e:
                 last = f"__ERRO__ {e}"
             if last and not last.startswith("__ERRO__"):
+                _cache_set(key, last)
+                _log("llm_ok", attempt=attempt + 1, provider=LLM_PROVIDER,
+                     prompt_tokens=prompt_toks, cached_size=len(_cache))
                 return last
+        _log("llm_fail", tries=tries, error=last[:200])
         return last
+
+    def get_usage_stats(self) -> Dict[str, Any]:
+        """Retorna contadores de uso para monitoring."""
+        return {
+            "total_calls": _total_calls,
+            "prompt_tokens_est": _total_prompt_tokens,
+            "completion_tokens_est": _total_completion_tokens,
+            "cache_size": len(_cache),
+            "provider": LLM_PROVIDER,
+        }
 
     def validate_chunks(self, question: str, ctxs: List[Dict]) -> List[Dict]:
         """LLM julga quais trechos sao realmente relevantes. 1 chamada por lote."""

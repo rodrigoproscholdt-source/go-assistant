@@ -1,5 +1,6 @@
 import os
 import traceback
+import json
 from pathlib import Path
 
 import streamlit as st
@@ -11,6 +12,26 @@ st.caption(
     f"FEBRASGO + Williams + SOGIMIG | Groq gpt-oss-120b | "
     f"build `{BUILD}`"
 )
+
+# ---- HEALTH CHECK (gratis, sem Groq) ----
+# Acesse: https://seu-app.streamlit.app/?healthz=1
+if st.query_params.get("healthz") == "1":
+    try:
+        from dme_engine import DMEEngine
+        eng = DMEEngine()
+        stats = eng.get_usage_stats()
+        books = list(eng.books) if hasattr(eng, "books") else []
+        st.json({
+            "status": "healthy",
+            "build": BUILD,
+            "chunks": eng.count(),
+            "books": books,
+            "groq_key": "OK" if os.getenv("GROQ_API_KEY") else "MISSING",
+            "usage": stats,
+        })
+    except Exception as e:
+        st.json({"status": "unhealthy", "error": str(e)})
+    st.stop()
 
 PDF_DIR = Path(__file__).parent
 DB_DIR = Path(__file__).parent / "chroma_db"
@@ -54,6 +75,10 @@ try:
         "Busca hibrida (vetor + BM25) com validacao LLM. "
         "Embeddings: ONNX local, sem torch."
     )
+    # Stats de uso (free tier monitoring)
+    with st.sidebar.expander("📊 Uso Groq (free tier)", expanded=False):
+        stats = dme.get_usage_stats()
+        st.json(stats)
 except Exception as e:
     st.error(f"Erro ao carregar o DME: {e}")
     st.code(traceback.format_exc())
@@ -80,13 +105,102 @@ if st.sidebar.button("Limpar historico"):
     st.session_state.aguardando_esclarecimento = None
     st.rerun()
 
-# Exemplos rápidos na sidebar
-st.sidebar.markdown("---")
-st.sidebar.markdown("**Exemplos de comandos:**")
-st.sidebar.code("/caso Mulher 28a, G2P1, 32 sem, dor abdominal 6h, febre 38.2")
-st.sidebar.code("/diferencial dor pelvica aguda gestacao 8 sem")
-st.sidebar.code("/emergencia hipertensao severa 34 sem proteinuria")
-st.sidebar.code("/pre-natal 12 sem gestaçao unica risco habitual")
+def _extract_pdf_text(file) -> str:
+    try:
+        import io
+        import pdfplumber
+        with pdfplumber.open(io.BytesIO(file.getvalue())) as pdf:
+            partes = []
+            for p in pdf.pages[:20]:
+                partes.append(p.extract_text() or "")
+        return "\n".join(partes)
+    except Exception as e:
+        return f"[texto de {file.name} nao extraivel: {e}]"
+
+
+def montar_entrada(prompt: str) -> str:
+    """Combina prompt + HDA + HPP + boxe + exames anexados em um unico texto."""
+    blocos = [prompt.strip()]
+    hda = (st.session_state.get("hda") or "").strip()
+    hpp = (st.session_state.get("hpp") or "").strip()
+    boxe = (st.session_state.get("boxe") or "").strip()
+    if hda:
+        blocos.append("HDA: " + hda)
+    if hpp:
+        blocos.append("HPP: " + hpp)
+    if boxe:
+        blocos.append("Exame fisico (boxe): " + boxe)
+    for nome, txt in (st.session_state.get("pdf_texts") or {}).items():
+        if txt.strip():
+            blocos.append("Resultado de exame (%s): %s" % (nome, txt[:6000]))
+    uploads = st.session_state.get("uploads") or []
+    imgs = [f.name for f in uploads
+            if getattr(f, "type", "").startswith("image/")]
+    if imgs:
+        blocos.append("Imagens de resultados anexadas: " + ", ".join(imgs))
+    return "\n\n".join(blocos)
+
+
+# ---- ENTRADA ESTRUTURADA: HDA / HPP / BOXE / EXAMES ----
+st.markdown("#### Dados do caso")
+col1, col2, col3 = st.columns(3)
+with col1:
+    st.text_area(
+        "HDA — Historia da Doenca Atual", height=150, key="hda",
+        placeholder="Queixa principal, evolucao, tempo, associacoes...",
+    )
+with col2:
+    st.text_area(
+        "HPP — Historia Patologica Passada", height=150, key="hpp",
+        placeholder="Comorbidades, cirurgias, medicacoes, alergias...",
+    )
+with col3:
+    st.text_area(
+        "Boxe — Exame Fisico", height=150, key="boxe",
+        placeholder="PA, FC, T, abdome, speculum, toque, pavimento...",
+    )
+
+st.markdown("#### Resultados de exames")
+uploads = st.file_uploader(
+    "Upload de PDF ou imagens (pasta DCIM, laudos, exames)",
+    type=["pdf", "png", "jpg", "jpeg", "webp", "gif"],
+    accept_multiple_files=True,
+    key="uploads",
+)
+
+if uploads:
+    imgs = [f for f in uploads if getattr(f, "type", "").startswith("image/")]
+    pdfs = [f for f in uploads if not getattr(f, "type", "").startswith("image/")]
+
+    # Boxe dedicado a imagens de resultados
+    with st.expander("Imagens de resultados (%d)" % len(imgs), expanded=bool(imgs)):
+        for f in imgs:
+            try:
+                st.image(f, caption=f.name)
+            except Exception as e:
+                st.warning("Nao foi possivel exibir %s: %s" % (f.name, e))
+
+    # Extrai texto dos PDFs (cache por nome)
+    if "pdf_texts" not in st.session_state:
+        st.session_state.pdf_texts = {}
+    ativos = {f.name for f in pdfs}
+    for nome in list(st.session_state.pdf_texts):
+        if nome not in ativos:
+            del st.session_state.pdf_texts[nome]
+    for f in pdfs:
+        if f.name not in st.session_state.pdf_texts:
+            st.session_state.pdf_texts[f.name] = _extract_pdf_text(f)
+    if pdfs:
+        st.caption(
+            "PDFs anexados (%d): texto extraido e injetado no caso."
+            % len(pdfs)
+        )
+        with st.expander("Texto extraido dos PDFs", expanded=False):
+            for nome, txt in st.session_state.pdf_texts.items():
+                st.markdown("**%s**" % nome)
+                st.text(txt[:4000])
+
+st.divider()
 
 for msg in st.session_state.messages:
     with st.chat_message(msg["role"]):
@@ -99,17 +213,19 @@ if prompt := st.chat_input("Descreva o caso clinico (ou use /comando)..."):
 
     with st.chat_message("assistant"):
         try:
+            entrada = montar_entrada(prompt)
+
             # Se estamos aguardando esclarecimento, combina com o contexto anterior
             if st.session_state.aguardando_esclarecimento:
                 ctx_base = st.session_state.aguardando_esclarecimento
                 # Re-parsa combinando a nova info
-                texto_combinado = f"{ctx_base['queixa_original']} {prompt}"
+                texto_combinado = f"{ctx_base['queixa_original']} {entrada}"
                 ctx = parse_clinical_input(texto_combinado)
                 # Preserva idade se já tinha sido dada
                 if ctx_base.get('idade'):
                     ctx.age = ctx_base['idade']
             else:
-                ctx = parse_clinical_input(prompt.strip())
+                ctx = parse_clinical_input(entrada)
 
             with st.spinner("Executando Differential Matrix Engine..."):
                 resposta_raw = dme.run_dme(ctx)
@@ -121,7 +237,7 @@ if prompt := st.chat_input("Descreva o caso clinico (ou use /comando)..."):
                 if isinstance(resposta_json, dict) and resposta_json.get("tipo") == "ESCLARECIMENTO":
                     # Guarda o contexto parcial para a proxima rodada
                     st.session_state.aguardando_esclarecimento = {
-                        "queixa_original": prompt,
+                        "queixa_original": entrada,
                         "idade": ctx.age,
                         "faltando": resposta_json["itens"]
                     }
