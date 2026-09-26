@@ -68,12 +68,16 @@ except Exception as e:
 if "messages" not in st.session_state:
     st.session_state.messages = []
 
+if "aguardando_esclarecimento" not in st.session_state:
+    st.session_state.aguardando_esclarecimento = None
+
 # Inicializado aqui para que NUNCA exista NameError, mesmo se o bloco de
 # chat for interrompido por excecao ou por uma versao antiga em cache.
 answer = "Nao foi possivel completar a analise. Tente novamente."
 
 if st.sidebar.button("Limpar historico"):
     st.session_state.messages = []
+    st.session_state.aguardando_esclarecimento = None
     st.rerun()
 
 # Exemplos rápidos na sidebar
@@ -88,19 +92,54 @@ for msg in st.session_state.messages:
     with st.chat_message(msg["role"]):
         st.markdown(msg["content"])
 
-if prompt := st.chat_input("Descreva o caso clínico (ou use /comando)..."):
+if prompt := st.chat_input("Descreva o caso clinico (ou use /comando)..."):
     st.session_state.messages.append({"role": "user", "content": prompt})
     with st.chat_message("user"):
         st.markdown(prompt)
 
     with st.chat_message("assistant"):
         try:
-            ctx = parse_clinical_input(prompt.strip())
+            # Se estamos aguardando esclarecimento, combina com o contexto anterior
+            if st.session_state.aguardando_esclarecimento:
+                ctx_base = st.session_state.aguardando_esclarecimento
+                # Re-parsa combinando a nova info
+                texto_combinado = f"{ctx_base['queixa_original']} {prompt}"
+                ctx = parse_clinical_input(texto_combinado)
+                # Preserva idade se já tinha sido dada
+                if ctx_base.get('idade'):
+                    ctx.age = ctx_base['idade']
+            else:
+                ctx = parse_clinical_input(prompt.strip())
 
             with st.spinner("Executando Differential Matrix Engine..."):
-                answer = dme.run_dme(ctx)
+                resposta_raw = dme.run_dme(ctx)
 
-            st.markdown(answer)
+            # Verifica se o DME pediu esclarecimento
+            try:
+                import json
+                resposta_json = json.loads(resposta_raw)
+                if isinstance(resposta_json, dict) and resposta_json.get("tipo") == "ESCLARECIMENTO":
+                    # Guarda o contexto parcial para a proxima rodada
+                    st.session_state.aguardando_esclarecimento = {
+                        "queixa_original": prompt,
+                        "idade": ctx.age,
+                        "faltando": resposta_json["itens"]
+                    }
+                    # Mostra a pergunta ao usuario
+                    msg = resposta_json["mensagem"] + "\n\n" + "\n".join(f"- {i}" for i in resposta_json["itens"])
+                    st.markdown(msg)
+                    answer = msg
+                else:
+                    # Resposta normal do DME
+                    st.session_state.aguardando_esclarecimento = None
+                    st.markdown(resposta_raw)
+                    answer = resposta_raw
+            except (json.JSONDecodeError, TypeError):
+                # Nao e JSON de esclarecimento, trata como resposta normal
+                st.session_state.aguardando_esclarecimento = None
+                st.markdown(resposta_raw)
+                answer = resposta_raw
+
             with st.expander("Fontes consultadas (resultado da busca)"):
                 ctxs = dme.hybrid_search(ctx.complaint, k=10, max_dist=0.68)
                 for i, c in enumerate(ctxs, 1):

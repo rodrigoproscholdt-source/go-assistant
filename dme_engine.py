@@ -594,8 +594,42 @@ JSON:"""
         validated = self.validate_chunks(f"{context.complaint} {hypothesis.diagnosis}", ctxs)
         return validated
 
+    def _checar_contexto_minimo(self, context: ClinicalContext) -> List[str]:
+        """Retorna lista de dados críticos ausentes. Se não vazia, DME deve pausar."""
+        faltando = []
+        if context.age is None:
+            faltando.append("Idade da paciente")
+        if context.pregnancy_status == "incerta" and not context.gestational_age_weeks:
+            faltando.append("Data da última menstruação ou resultado de β-hCG")
+        if context.is_pregnant and context.gestational_age_weeks is None:
+            faltando.append("Idade gestacional (semanas)")
+        if not context.complaint or len(context.complaint.split()) < 3:
+            faltando.append("Descrição do motivo da consulta (sintomas, duração, evolução)")
+        return faltando
+
+    def _retrieve_by_module(self, modulo: str, context: ClinicalContext, k: int = 6) -> List[Dict]:
+        """Busca forçada no módulo específico para garantir cobertura dos 3 livros."""
+        query = f"{context.complaint} {modulo}"
+        return self.hybrid_search(query, k=k, max_dist=0.68)
+
     def run_dme(self, context: ClinicalContext) -> str:
-        """Pipeline completo DME."""
+        """Pipeline completo DME. Retorna JSON se precisar de esclarecimento."""
+        # 0. Checa contexto mínimo antes de qualquer processamento
+        faltando = self._checar_contexto_minimo(context)
+        if faltando:
+            import json
+            return json.dumps({
+                "tipo": "ESCLARECIMENTO",
+                "mensagem": "Para orientar com segurança, preciso das seguintes informações:",
+                "itens": faltando,
+                "contexto_atual": {
+                    "idade": context.age,
+                    "gestacao": context.pregnancy_status,
+                    "IG": context.gestational_age_weeks,
+                    "queixa": context.complaint,
+                }
+            }, ensure_ascii=False)
+
         # 1. Hipóteses iniciais
         hypotheses = self.generate_initial_hypotheses(context)
         if not hypotheses:
@@ -711,6 +745,7 @@ def parse_clinical_input(text: str) -> ClinicalContext:
         r"\big\s*(?:de)?\s*:?\s*(\d{1,2})\s*(?:sem|s\b)",
         r"(\d{1,2})\s*sem(?:anas)?\s+de\s+gesta",
         r"gesta\w*\s+(?:de|com)\s+(\d{1,2})\s*sem",
+        r"gestante\s+(\d{1,2})\s*sem",
         r"(\d{1,2})\s*sem(?:anas)?\s+(?:de\s+gestacao|gestacional)",
     ):
         m_ig = re.search(padrao, low)
@@ -732,6 +767,12 @@ def parse_clinical_input(text: str) -> ClinicalContext:
                 ctx.amenorrhea_days = n
             else:
                 ctx.amenorrhea_days = n * 30
+
+    # --- 2b. 'N semanas' isolado quando ha G/P (ex: 'G2P1 32 semanas') ---
+    if not m_ig and m_gp:
+        m_bare = re.search(r"(\d{1,2})\s*sem(?:anas)?\b", low)
+        if m_bare:
+            m_ig = int(m_bare.group(1))
 
     if isinstance(m_ig, int):
         ctx.gestational_age_weeks = m_ig
