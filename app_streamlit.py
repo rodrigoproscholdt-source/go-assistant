@@ -5,8 +5,8 @@ import chromadb
 from chromadb.utils import embedding_functions
 from groq import Groq
 
-PDF_DIR = Path(r"D:\GO_assit")
-DB_DIR = Path(r"D:\GO_assit\chroma_db")
+PDF_DIR = Path(__file__).parent
+DB_DIR = Path(__file__).parent / "chroma_db"
 COLLECTION_NAME = "go_books"
 EMBED_MODEL = "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
 GROQ_MODEL = "llama-3.1-70b-versatile"
