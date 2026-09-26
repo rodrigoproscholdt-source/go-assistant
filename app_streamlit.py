@@ -86,12 +86,13 @@ if prompt := st.chat_input("Descreva o caso clínico (ou use /comando)..."):
         st.markdown(prompt)
 
     with st.chat_message("assistant"):
+        answer = (
+            "Nao foi possivel completar a analise. "
+            "Verifique a conexao e tente novamente."
+        )
         try:
-            # Parse comando se houver
-            text = prompt.strip()
-            ctx = parse_clinical_input(text)
+            ctx = parse_clinical_input(prompt.strip())
 
-            # Executa DME completo
             with st.spinner("Executando Differential Matrix Engine..."):
                 answer = dme.run_dme(ctx)
 
@@ -107,7 +108,8 @@ if prompt := st.chat_input("Descreva o caso clínico (ou use /comando)..."):
                     st.caption(c["text"][:300])
 
         except Exception as e:
-            st.error(f"Erro: {e}")
+            answer = f"Erro ao processar: {e}"
+            st.error(answer)
             st.code(traceback.format_exc())
 
     st.session_state.messages.append({"role": "assistant", "content": answer})

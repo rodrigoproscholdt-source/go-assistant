@@ -1,4 +1,4 @@
-"""
+﻿"""
 Differential Matrix Engine (DME) — Motor de Raciocínio Clínico Obrigatório
 Toda query passa por este pipeline antes de responder.
 """
@@ -72,6 +72,12 @@ class ClinicalContext:
     labs: Dict[str, Any] = None
     imaging: Dict[str, Any] = None
     is_pregnant: bool = False
+    # 'confirmada' | 'incerta' | 'nao' | ''
+    pregnancy_status: str = ""
+    amenorrhea_weeks: Optional[int] = None
+    amenorrhea_days: Optional[int] = None
+    fetal_viability: str = ""
+    multiples: str = ""
 
 
 class DMEEngine:
@@ -261,147 +267,273 @@ class DMEEngine:
 
         livros = ", ".join(sorted(grouped)) or "nenhum"
 
-        return f"""Você é o DIFFERENTIAL MATRIX ENGINE (DME) — Ginecologia/Obstetrícia.
-Siga RIGOROSAMENTE o pipeline DME. Não pule etapas.
+        return f"""Voce e o GINECO-OBSTETRICS EXPERT CORE. O DIFFERENTIAL MATRIX ENGINE
+v1.0 e o mecanismo que impede o fechamento diagnostico precoce.
 
-CONTEXTO CLÍNICO:
+CONTEXTO CLINICO
 - Queixa: {context.complaint}
 - Idade: {context.age}
-- Idade gestacional: {context.gestational_age_weeks or 'N/A'} semanas
-- Gestação: G{context.gravida}P{context.para}
+- GESTACAO: {_pregnancy_block(context)}
 - Sinais vitais: {context.vital_signs}
-- Exame físico: {context.physical_exam}
+- Exame fisico: {context.physical_exam}
 - Fatores de risco: {context.risk_factors}
 - Exames laboratoriais: {context.labs}
 - Imagem: {context.imaging}
-- Gestante: {'SIM' if context.is_pregnant else 'NÃO'}
 
-HIPÓTESES GERADAS:
+REGRA ESTRUTURAL DE GESTACAO (obrigatoria): a idade gestacional NAO e um
+dado complementar, e uma variavel estrutural do differential. A mesma queixa
+produz differential completamente diferente conforme a IG. Se a situacao
+gestacional for INCERTA ou NAO INFORMADA, isso e o primeiro dado a buscar:
+pergunte antes de fechar o raciocinio, e mantenha em aberto a possibilidade
+de ectopic e de TPP (teste de gravidez e ultrassonografia).
+
+HIPOTESES GERADAS (5 eixos: probabilidade, gravidade, urgencia,
+compatibilidade, exclusao):
 {hyp_text}
 
-TRECHOS VALIDADOS DOS TRATADOS (fontes consultadas: {livros}):
+EVIDENCIA VALIDADA NOS TRATADOS (fontes: {livros}):
 {pdf_blocks}
 
-=== PIPELINE OBRIGATÓRIO ===
+PIPELINE OBRIGATORIO - execute nesta ordem, sem pular etapas:
 
-1. REFINAR HIPÓTESES: Ajuste probabilidade/severidade/urgência baseado no contexto.
-2. IDENTIFICAR CANNOT-MISS: Liste diagnósticos que NÃO PODEM SER PERDIDOS (Camada C).
-3. MATRIZ DE DISCRIMINAÇÃO: Para cada hipótese relevante (A+B+C), preencha:
-   - O que favorece / O que contradiz / Dados ausentes
-   - Exame discriminatório ideal + limitações (falso-negativo, janela, sensibilidade)
-   - Achado confirmatório / Achado que exclui
-   - Próximo passo
-4. BUSCA NOS PDFs: Use trechos acima para sustentar/refutar cada hipótese.
-5. REAVALIAÇÃO BAYESIANA: Atualize probabilidades com achados.
-5. SAFETY CHECK: Diagnóstico fatal excluído? Condição tempo-dependente? Risco materno/fetal? Anti-ancoragem?
-6. CONCLUSÃO: Diagnóstico provisório + nível de incerteza + dados necessários.
-7. CONDUTA + FOLLOW-UP.
+1. CARACTERIZACAO CLINICA da queixa e do contexto.
+2. REFINAR as hipoteses: recalcule probabilidade, gravidade e urgencia.
+3. IDENTIFICAR OS QUE NAO PODEM SER PERDIDOS (camada C), incluindo as
+   obstetricas: ectopic, DPP, placenta previa, pre-eclampsia com sinais de
+   gravidade, eclampsia, HELLP, hemorragia, sepse materna, rotura uterina,
+   sofrimento fetal. E as ginecologicas: torsao anexial, ectopic,
+   hemorragia significativa, infeccao pelvica grave, sepse, abdomen agudo.
+4. DIFERENCIAIS POR SISTEMA (ginecologico, obstetrico, GI, urinario,
+   vascular, endocrinologico, hematologico) com mimetizadores.
+5. MATRIZ DE DISCRIMINACAO para cada hipotese relevante (A+B+C).
+6. EXAMES DISCRIMINATORIOS com limitacoes: falso-negativo, janela clinica,
+   sensibilidade, especificidade, qualidade do exame, probabilidade pre-teste.
+   "Exame negativo" NAO e igual a "diagnostico excluido".
+7. REAVALIACAO: incorpore todo novo dado. Hipótese sobe, desce, permanece
+   ou e descartada. Repita o ciclo.
+8. SAFETY CHECK explicito.
+9. ANTI-ANCORAGEM: identifique premissas como "e so infeccao", "e apenas
+   sangramento menstrual", "a ultrassonografia veio normal", "o beta-hCG
+   esta baixo entao nao e ectopic", "ela tem HAS entao a cefaleia e da HAS".
+   Para cada uma, pergunte: existe outra hipotese que explique melhor o
+   conjunto? Qual diagnostico perigoso ainda nao foi excluido?
+10. CONDUTA + FOLLOW-UP.
 
-=== FORMATO DE SAÍDA (OBRIGATÓRIO) ===
-Responda EXATAMENTE neste formato Markdown:
+VOCE NAO E UM CALCULADOR DIAGNOSTICO. Os valores internos servem para
+organizar e priorizar. A resposta deve EXPLICAR por que uma hipotese sobe
+ou desce. Se os dados nao sustentam fechar o diagnostico, diga:
+"Com os dados disponiveis, ainda nao e seguro fechar o diagnostico" e
+liste exatamente o que falta.
 
-## DIFFERENTIAL MATRIX ENGINE — GO
+FORMATO DE SAIDA OBRIGATORIO:
 
-### SÍNDROME/QUEIXA
-[descrição]
+## DIFFERENTIAL MATRIX
 
-### CONTEXTO CLÍNICO
-[resumo]
+**SINDROME:**
+[descricao]
 
-### HIPÓTESES GERADAS
-**CAMADA A (Principal):**
-1. [...] — prob. X%, compat. Y%
-**CAMADA B (Relevantes):**
-1. [...]
-**CAMADA C — NÃO PODEM SER PERDIDOS ⚠️:**
-1. [...] — gravidade: crítica, urgência: imediata
-**CAMADA D — Mimetizadores:**
-• [...]
+**HIPOTESE PRINCIPAL:**
+[diagnostico]
 
-### MATRIZ DE DISCRIMINAÇÃO
-Para cada hipótese relevante (A+B+C):
-**Hipótese: [...]
-- O que favorece: [...]
-- O que contradiz: [...]
-- Dados ausentes: [...]
-- Exame discriminatório ideal: [...]
-- Limitações do exame (falso-negativo, janela, sensibilidade): [...]
-- Achado que CONFIRMA: [...]
-- Achado que EXCLUI: [...]
-- Próximo passo: [...]
+**DIFERENCIAIS RELEVANTES:**
+1. [diagnostico]
+2. [diagnostico]
 
-### BUSCA NOS PDFs (FEBRASGO/Williams/SOGIMIG)
-[Trechos citados com livro + página]
+**NAO PODEM SER PERDIDOS:**
+- [diagnostico] - gravidade: [ ] - urgencia: [ ] - por que nao pode ser ignorada
+- [diagnostico]
+
+**MIMETIZADORES:**
+- [diagnostico]
+
+### MATRIZ DE DISCRIMINACAO
+Para cada hipotese relevante (A, B e C), repita:
+**HIPOTESE: [nome]**
+- A favor: [...]
+- Contra: [...]
+- Dados que faltam: [...]
+- Achado altamente sugestivo: [...]
+- Achado incompativel: [...]
+- Exame que melhor diferencia: [...]
+- Exame que NAO exclui adequadamente: [...]
+- Falso-negativo relevante: [...]
+- emergencia associada: [...]
+- Proximo passo: [...]
+
+### ANTI-ANCORAGEM
+| Premissa assumida | Problema | Hipotese alternativa |
+|---|---|---|
 
 ### SAFETY CHECK
-☐ Diagnóstico fatal adequadamente excluído?
-☐ Condição tempo-dependente abordada?
-☐ Risco materno/fetal abordado?
-☐ Encaminhamento/internação necessário?
-☐ Anti-ancoragem verificada?
-⚠️ ALERTAS: [...]
+- [ ] Diagnostico potencialmente fatal foi adequadamente excluido?
+- [ ] Condicao tempo-dependente abordada?
+- [ ] Risco materno avaliado?
+- [ ] Risco fetal avaliado?
+- [ ] Encaminhamento ou internacao necessarios?
+- [ ] Algum diagnostico grave permanece insuficientemente excluido?
+**ALERTAS:** [...]
 
-### CONCLUSÃO PROVISÓRIA
-**Diagnóstico:** [...]
-**Nível de incerteza:** [baixo/moderado/alto]
-**Dados necessários para reduzir incerteza:** [...]
+### CONCLUSAO PROVISORIA
+**Interpretacao:** [...]
+**Nivel de incerteza:** [baixo / moderado / alto]
+**Dados necessarios para reduzir a incerteza:** [...]
 
 ### CONDUTA + FOLLOW-UP
-1. [...]
-2. [...]
+1. [conduta imediata]
+2. [investigacao]
+3. [seguimento e reavaliacao]
+4. [quando reavaliar e o que dispara escalonamento]
 
-REGRAS:
-- NÃO invente informação fora dos trechos dos PDFs.
-- Se incerteza alta → declare + liste dados necessários.
-- SEMPRE cite livro + página.
-- Anti-ancoragem: questione "é só X", "exame normal", "β-hCG baixo".
+### FONTES CONSULTADAS
+[Livro, pagina] - [Livro, pagina] - [Livro, pagina]
+
+REGRAS INEGOCIÁVEIS:
+- Baseie-se APENAS na evidencia validada acima. Nao invente.
+- Cite livro e pagina em cada afirmacao relevante.
+- Se a evidencia for insuficiente, escreva "nos trechos validados nao
+  encontrei esta informacao" em vez de preencher com suposicao.
+- Destaque com ⚠️ tudo que nao pode ser perdido.
+- Nao prescreva sem qualificar: e suporte ao raciocinio clinico do
+  profissional, que confirma a conduta.
 """
 
     def generate_initial_hypotheses(self, context: ClinicalContext) -> List[Hypothesis]:
         """Gera hipóteses iniciais baseadas na queixa + contexto."""
-        sys_prompt = """Você é especialista em Ginecologia/Obstetrícia.
-Gere hipóteses diagnósticas AMPLAS para a queixa/clínica dada.
-Organize por SISTEMA (Ginecológico, Obstétrico, GI, Urinário, Vascular, etc.).
-Para cada hipótese, estime: probabilidade (0-1), severidade (1-5), urgência (1-5).
-Inclua diagnósticos que NÃO PODEM SER PERDIDOS (baixa prob + alta gravidade).
-Retorne JSON válido com lista de objetos:
-{"diagnosis": str, "probability": float, "severity": int, "urgency": int,
- "system": str, "layer": "A|B|C|D"}"""
+        sys_prompt = """Voce e especialista em Ginecologia e Obstetricia.
+Gere hipoteses diagnosticas AMPLAS para a queixa klinica dada.
+Organize por SISTEMA (Ginecologico, Obstetrico, GI, Urinario, Vascular, etc.).
+Para cada hipotese, estime: probabilidade (0-1), severidade (1-5), urgencia (1-5).
+Inclua diagnosticos que NAO PODEM SER PERDIDOS (baixa probabilidade + alta gravidade).
+Responda SOMENTE com JSON valido, sem texto em volta, sem markdown.
+
+Formato OBRATORIO:
+{"hypotheses": [{"diagnosis": "nome clinico", "probability": 0.5,
+  "severity": 3, "urgency": 3, "system": "sistema",
+  "layer": "A", "favoring": ["..."], "against": ["..."], "missing": ["..."],
+  "best_test": "exame", "test_limitations": "limitacao",
+  "confirmatory_finding": "achado", "excluding_finding": "achado",
+  "next_step": "passo"}]}
+
+Camadas: A = mais compativel, B = diferencial relevante,
+C = nao pode ser perdida, D = mimetizador."""
 
         user_prompt = f"""QUEIXA: {context.complaint}
 CONTEXTO: idade={context.age}, IG={context.gestational_age_weeks}, G{context.gravida}P{context.para}
 Gestante: {context.is_pregnant}
 Sinais vitais: {context.vital_signs}
-Exame físico: {context.physical_exam}
+Exame fisico: {context.physical_exam}
 Fatores de risco: {context.risk_factors}
 Labs: {context.labs}
-Imagem: {context.imaging}"""
+Imagem: {context.imaging}
 
-        resp = self.groq.chat.completions.create(
-            model=GROQ_MODEL,
-            messages=[{"role": "system", "content": sys_prompt},
-                      {"role": "user", "content": user_prompt}],
-            temperature=0.3, max_tokens=4000,
-            response_format={"type": "json_object"},
+JSON:"""
+
+        raw = self._chat(
+            "Voce e um gerador de hipoteses clinicas. Responda APENAS com "
+            "JSON valido, sem cercas de markdown e sem commentary.",
+            user_prompt, temperature=0.3, max_tokens=6000, tries=3,
         )
-        data = json.loads(resp.choices[0].message.content)
-        hypotheses = []
-        for h in data.get("hypotheses", []):
-            hypotheses.append(Hypothesis(
-                diagnosis=h["diagnosis"],
-                probability=h["probability"],
-                severity=h["severity"],
-                urgency=h["urgency"],
-                compatibility=0.5,  # será atualizado
-                exclusion_strength=0.5,
-                layer=h.get("layer", "B"),
-                system=h.get("system", "Outro"),
-                favoring=[], against=[], missing=[],
-                best_test="", test_limitations="",
-                confirmatory_finding="", excluding_finding="",
-                next_step=""
+        return self._parse_hypotheses(raw)
+
+    def _fallback_hypotheses(self, context: ClinicalContext) -> List[Hypothesis]:
+        """Estrutura minima caso o LLM falhe: ainda busca evidencia e responde."""
+        generic = [("Queixa a esclarecer", "Geral", "B", 3, 3)]
+        if context.is_pregnant:
+            generic = [
+                ("Gestacao a confirmar", "Obstetrico", "A", 4, 4),
+                ("Abortamento", "Obstetrico", "C", 4, 5),
+                ("Gravidez ectopica", "Obstetrico", "C", 5, 5),
+            ]
+        return [Hypothesis(
+            diagnosis=d, probability=0.2, severity=s, urgency=u,
+            compatibility=0.3, exclusion_strength=0.3, layer=l, system=sy,
+            favoring=[], against=[], missing=["dados clinicos ausentes"],
+            best_test="", test_limitations="", confirmatory_finding="",
+            excluding_finding="", next_step="",
+        ) for d, sy, l, s, u in generic]
+
+    @staticmethod
+    def _parse_hypotheses(raw: str) -> List["Hypothesis"]:
+        """Tolera dict, lista pura, cercas de markdown e campos faltando."""
+        if not raw:
+            return []
+        txt = raw.strip()
+        txt = re.sub(r"^```(?:json)?|```$", "", txt, flags=re.M).strip()
+
+        data = None
+        for candidate in (txt, _first_json_object(txt)):
+            if not candidate:
+                continue
+            try:
+                data = json.loads(candidate)
+                break
+            except Exception:
+                continue
+
+        if data is None:
+            m = re.search(r"\{.*\}", txt, re.S) or re.search(r"\[.*\]", txt, re.S)
+            if m:
+                try:
+                    data = json.loads(m.group(0))
+                except Exception:
+                    return []
+
+        if isinstance(data, dict):
+            items = (data.get("hypotheses") or data.get("diagnoses")
+                     or data.get("differential") or data.get("hipoteses") or [])
+        elif isinstance(data, list):
+            items = data
+        else:
+            items = []
+
+        out: List[Hypothesis] = []
+        for h in items:
+            if isinstance(h, str):
+                h = {"diagnosis": h}
+            if not isinstance(h, dict):
+                continue
+            name = h.get("diagnosis") or h.get("nome") or h.get("diagnostico")
+            if not name:
+                continue
+
+            def num(key, default, lo, hi):
+                v = h.get(key, default)
+                try:
+                    v = float(v)
+                except (TypeError, ValueError):
+                    v = float(default)
+                if hi > 1.5:
+                    v = max(lo, min(hi, v))
+                return max(lo, min(hi, v))
+
+            def lst(key):
+                v = h.get(key)
+                if isinstance(v, str):
+                    return [v] if v.strip() else []
+                return list(v) if isinstance(v, (list, tuple)) else []
+
+            def txt(key):
+                v = h.get(key)
+                return v if isinstance(v, str) else ""
+
+            out.append(Hypothesis(
+                diagnosis=str(name)[:160],
+                probability=num("probability", 0.3, 0.0, 1.0),
+                severity=num("severity", 3, 1, 5),
+                urgency=num("urgency", 3, 1, 5),
+                compatibility=num("compatibility", 0.5, 0.0, 1.0),
+                exclusion_strength=num("exclusion_strength", 0.5, 0.0, 1.0),
+                layer=str(h.get("layer", "B")).strip().upper()[:1] or "B",
+                system=txt("system") or "Geral",
+                favoring=lst("favoring"), against=lst("against"),
+                missing=lst("missing"),
+                best_test=txt("best_test"), test_limitations=txt("test_limitations"),
+                confirmatory_finding=txt("confirmatory_finding"),
+                excluding_finding=txt("excluding_finding"),
+                next_step=txt("next_step"),
             ))
-        return hypotheses
+        return out
+
 
     def search_pdf_for_hypothesis(self, hypothesis: Hypothesis, context: ClinicalContext) -> List[Dict]:
         """Busca trechos relevantes para uma hipótese específica."""
@@ -414,6 +546,9 @@ Imagem: {context.imaging}"""
         """Pipeline completo DME."""
         # 1. Hipóteses iniciais
         hypotheses = self.generate_initial_hypotheses(context)
+        if not hypotheses:
+            Say = "motor indisponivel"
+            hypotheses = self._fallback_hypotheses(context)
 
         # 2. Busca nos PDFs: 1 query por SISTEMA (agrupa hipoteses) + 1 query
         #    pela queixa pura. Garante cobertura dos 3 livros sem explodir
@@ -457,24 +592,157 @@ Imagem: {context.imaging}"""
         )
 
 
+def _first_json_object(txt: str) -> str:
+    """Extrai o primeiro objeto/array JSON balanceado de um texto."""
+    depth = 0
+    start = None
+    in_str = False
+    esc = False
+    for i, ch in enumerate(txt):
+        if in_str:
+            if esc:
+                esc = False
+            elif ch == "\\":
+                esc = True
+            elif ch == '"':
+                in_str = False
+            continue
+        if ch == '"':
+            in_str = True
+        elif ch in "{[":
+            if depth == 0:
+                start = i
+            depth += 1
+        elif ch in "}]":
+            if depth:
+                depth -= 1
+                if depth == 0 and start is not None:
+                    return txt[start:i + 1]
+    return ""
+
+
+_AMENORRHEA = re.compile(
+    r"(falta\s+de\s+menstrua|amenorre|nao\s+menstrua|sem\s+menstrua"
+    r"|atraso\s+menstru|menstrua\w*\s+(?:ha|à)\s+\d)"
+)
+_GESTANTE = re.compile(
+    r"\b(gestante|gesta[çc][ãa]o|gr[aá]vida|grav[aá]vida|"
+    r"\bde\s+\d+\s+semanas\s+de\s+gesta|com\s+\d+\s+semanas)\b"
+)
+
+
 def parse_clinical_input(text: str) -> ClinicalContext:
-    """Parse simples de entrada livre para ClinicalContext.
-    Em produção, usar LLM para extrair entidades."""
+    """Extrai idade, IG, G/P e situacao gestacional.
+
+    Cuidado clinico: 'falta de menstruacao ha 4 semanas' NAO e 'gestante de
+    4 semanas'. Sao situacoes opostas - a primeira suggests amenorreia, a
+    segunda uma gestacao，年轻. Por isso nao assumimos gestacao por causa da
+    palavra 'semanas' isolada.
+    """
     ctx = ClinicalContext(complaint=text)
-    # Heurísticas simples
-    text_lower = text.lower()
-    if any(w in text_lower for w in ["gestante", "gestação", "semanas", "ig ", "ig:", "semana"]):
+    low = _strip_accents(text.lower())
+
+    m_age = re.search(r"(\d{1,2})\s*anos?", low)
+    if m_age:
+        ctx.age = int(m_age.group(1))
+
+    m_gp = re.search(r"\bg\s*(\d)\s*p\s*(\d)\b", low)
+    if m_gp:
+        ctx.gravida, ctx.para = int(m_gp.group(1)), int(m_gp.group(2))
+
+    tem_amenorreia = bool(_AMENORRHEA.search(low))
+    cita_gestante = bool(_GESTANTE.search(low)) or bool(m_gp)
+
+    # --- 1. IG declarada explicitamente ---
+    m_ig = None
+    for padrao in (
+        r"\big\s*(?:de)?\s*:?\s*(\d{1,2})\s*(?:sem|s\b)",
+        r"(\d{1,2})\s*sem(?:anas)?\s+de\s+gesta",
+        r"gesta\w*\s+(?:de|com)\s+(\d{1,2})\s*sem",
+        r"(\d{1,2})\s*sem(?:anas)?\s+(?:de\s+gestacao|gestacional)",
+    ):
+        m_ig = re.search(padrao, low)
+        if m_ig:
+            break
+
+    # --- 2. 'ha/com N semanas' sem rotulo: depende do contexto ---
+    # 'G2P1 ha 30 semanas'   -> IG 30   (G/P prova que esta gestante)
+    # 'falta de menstruacao ha 4 semanas' -> amenorreia de 4 semanas
+    if not m_ig:
+        m_num = re.search(r"(?:ha|à|com|desde|faz)\s+(\d{1,2})\s*(sem|dias|m[eê]s)", low)
+        if m_num:
+            n, un = int(m_num.group(1)), m_num.group(2)
+            if cita_gestante and not tem_amenorreia:
+                m_ig = n
+            elif un.startswith("sem"):
+                ctx.amenorrhea_weeks = n
+            elif un.startswith("dia"):
+                ctx.amenorrhea_days = n
+            else:
+                ctx.amenorrhea_days = n * 30
+
+    if isinstance(m_ig, int):
+        ctx.gestational_age_weeks = m_ig
+    elif m_ig is not None and hasattr(m_ig, "group"):
+        ctx.gestational_age_weeks = int(m_ig.group(1))
+    if ctx.gestational_age_weeks:
         ctx.is_pregnant = True
-        m = re.search(r"(\d+)\s*sem", text_lower)
-        if m:
-            ctx.gestational_age_weeks = int(m.group(1))
-    m = re.search(r"(\d+)\s*anos?", text_lower)
-    if m:
-        ctx.age = int(m.group(1))
-    m = re.search(r"g(\d+)p(\d+)", text_lower)
-    if m:
-        ctx.gravida, ctx.para = int(m.group(1)), int(m.group(2))
+
+    # --- 3. 'atraso/amenorreia de N semanas' ---
+    if not ctx.amenorrhea_weeks and not ctx.amenorrhea_days:
+        m_am = re.search(
+            r"(?:atraso\s+menstru\w*|amenorre\w*|falta\s+de\s+menstru\w*)"
+            r"[^.\d]{0,12}?(\d{1,3})\s*(sem|dias|m[eê]s)", low)
+        if m_am:
+            n, un = int(m_am.group(1)), m_am.group(2)
+            if un.startswith("sem"):
+                ctx.amenorrhea_weeks = n
+            elif un.startswith("dia"):
+                ctx.amenorrhea_days = n
+            else:
+                ctx.amenorrhea_days = n * 30
+
+    if cita_gestante and not tem_amenorreia:
+        ctx.is_pregnant = True
+
+    # Regra clinica: se ha amenorreia e a IG nao foi declarada, a gestacao
+    # e INCERTA. Marcamos para o DME perguntar em vez de assumir.
+    if tem_amenorreia and not ctx.gestational_age_weeks:
+        ctx.pregnancy_status = "incerta"
+
     return ctx
+
+
+def _strip_accents(s: str) -> str:
+    s = unicodedata.normalize("NFKD", s)
+    return "".join(c for c in s if not unicodedata.combining(c))
+
+
+def _pregnancy_block(ctx: "ClinicalContext") -> str:
+    """Bloco de gestacao para o prompt. Explicita o que falta."""
+    parts = []
+    if ctx.gravida is not None or ctx.para is not None:
+        parts.append(f"G{ctx.gravida or '?'}P{ctx.para or '?'}")
+
+    status = ctx.pregnancy_status
+    if ctx.gestational_age_weeks:
+        parts.append(f"IG {ctx.gestational_age_weeks} semanas (confirmada)")
+    elif status == "incerta":
+        parts.append("GESTACAO INCERTA - nao confirmada. Nao assumir gestante.")
+    elif ctx.is_pregnant:
+        parts.append("gestante, IG NAO INFORMADA - dado essencial ausente")
+    else:
+        parts.append("nao ha indicacao de gestacao no relato")
+
+    if ctx.amenorrhea_weeks:
+        parts.append(f"amenorreia ha {ctx.amenorrhea_weeks} semanas")
+    elif ctx.amenorrhea_days:
+        parts.append(f"amenorreia ha {ctx.amenorrhea_days} dias")
+    if ctx.multiples:
+        parts.append(f"gestacao {ctx.multiples}")
+    if ctx.fetal_viability:
+        parts.append(f"vitalidade fetal: {ctx.fetal_viability}")
+    return " | ".join(parts)
 
 
 # CLI para teste
