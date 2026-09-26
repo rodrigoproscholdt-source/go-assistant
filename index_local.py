@@ -9,14 +9,31 @@ PDF_DIR = Path(__file__).parent
 DB_DIR = Path(__file__).parent / "chroma_db"
 COLLECTION_NAME = "go_books"
 
-CHUNK_WORDS = 360
-OVERLAP_WORDS = 30
+CHUNK_WORDS = 520
+OVERLAP_WORDS = 65
+
+BOOK_RULES = (
+    ("FEBRASGO", "FEBRASGO"),
+    ("SOGIMIG", "SOGIMIG"),
+    ("WILLIAMS", "Williams"),
+)
+
+
+def book_label(name):
+    upper = name.upper()
+    for needle, label in BOOK_RULES:
+        if needle in upper:
+            return label
+    return "Williams"
 
 
 def clean_text(t):
     t = re.sub(r"(\w)-\n(\w)", r"\1\2", t)
     t = re.sub(r"Hoffman_\d+\.indd\s*\d+\s*", "", t)
     t = re.sub(r"apostilasmedicina@hotmail\.com", "", t)
+    t = re.sub(r"\S*@gmail\.com\S*", "", t)
+    t = re.sub(r"\d{1,2}\s*/\s*\d{1,2}\s*/\s*\d{2,4}", " ", t)
+    t = re.sub(r"[\uFFFD\u00C2\u00C3]\S{0,2}", " ", t)
     t = re.sub(r"\s+", " ", t)
     return t.strip()
 
@@ -57,7 +74,7 @@ col = client.get_or_create_collection(
 
 total = 0
 for pdf_file in sorted(PDF_DIR.glob("*.pdf")):
-    book_label = "FEBRASGO" if "FEBRASGO" in pdf_file.name else "Williams"
+    book_label_value = book_label(pdf_file.name)
     with pdfplumber.open(pdf_file) as pdf:
         print(f"Abrindo {pdf_file.name} ({len(pdf.pages)} paginas)...")
         b_ids, b_docs, b_metas = [], [], []
@@ -69,9 +86,10 @@ for pdf_file in sorted(PDF_DIR.glob("*.pdf")):
             if len(text) < 80:
                 continue
             for piece, pp in chunks_from(text, pn):
-                b_ids.append(f"{book_label}_{total + len(b_ids)}")
+                b_ids.append(f"{book_label_value}_{total + len(b_ids)}")
                 b_docs.append(piece)
-                b_metas.append({"source": pdf_file.stem, "page": pp, "book": book_label})
+                b_metas.append({"source": pdf_file.stem, "page": pp,
+                                "book": book_label_value})
             if len(b_docs) >= 128:
                 col.add(ids=b_ids, documents=b_docs, metadatas=b_metas)
                 total += len(b_ids)
@@ -83,6 +101,14 @@ for pdf_file in sorted(PDF_DIR.glob("*.pdf")):
     print(f"Concluido: {pdf_file.name} ({total} chunks)")
 
 print(f"TOTAL: {col.count()} chunks")
+
+per_book = {}
+for m in col.get(include=["metadatas"])["metadatas"]:
+    per_book[m["book"]] = per_book.get(m["book"], 0) + 1
+print("POR LIVRO: " + " | ".join(f"{k}={v}" for k, v in sorted(per_book.items())))
+
+db_bytes = sum(p.stat().st_size for p in DB_DIR.rglob("*") if p.is_file())
+print(f"DISCO: {db_bytes / (1024 * 1024):.2f} MB")
 
 for q in ["rotura prematura de membranas",
           "exames do pre natal de rotina",
