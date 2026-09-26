@@ -21,10 +21,51 @@ def get_collection():
         model_name=EMBED_MODEL,
         device="cpu"
     )
-    collection = client.get_collection(
+    try:
+        collection = client.get_collection(
+            name=COLLECTION_NAME,
+            embedding_function=emb_fn
+        )
+        if collection.count() > 0:
+            return collection
+    except Exception:
+        pass
+
+    st.info("Indexando PDFs pela primeira vez (5-15 min)...")
+    all_chunks = []
+    for pdf_file in PDF_DIR.glob("*.pdf"):
+        st.write(f"Processando {pdf_file.name}...")
+        import pdfplumber
+        with pdfplumber.open(pdf_file) as pdf:
+            book_name = pdf_file.stem
+            book_label = "FEBRASGO" if "FEBRASGO" in book_name else "Williams"
+            for page_num, page in enumerate(pdf.pages, 1):
+                text = page.extract_text()
+                if not text or len(text.strip()) < 50:
+                    continue
+                words = text.split()
+                for i in range(0, len(words), 800):
+                    chunk = " ".join(words[i:i + 800])
+                    if len(chunk.strip()) > 100:
+                        all_chunks.append({
+                            "text": chunk.strip(),
+                            "metadata": {"source": book_name, "page": page_num, "book": book_label}
+                        })
+
+    st.write(f"Indexando {len(all_chunks)} chunks...")
+    collection = client.get_or_create_collection(
         name=COLLECTION_NAME,
-        embedding_function=emb_fn
+        embedding_function=emb_fn,
+        metadata={"hnsw:space": "cosine"}
     )
+    ids = [f"chunk_{i}" for i in range(len(all_chunks))]
+    for i in range(0, len(all_chunks), 100):
+        collection.add(
+            ids=ids[i:i+100],
+            documents=[c["text"] for c in all_chunks[i:i+100]],
+            metadatas=[c["metadata"] for c in all_chunks[i:i+100]]
+        )
+    st.success(f"Indexação completa: {collection.count()} chunks")
     return collection
 
 
