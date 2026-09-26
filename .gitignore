@@ -22,3 +22,6 @@ endo1.txt
 
 # banco antigo monolitico (substituido por chroma_db_<livro>/)
 chroma_db/
+
+# logs de operacao
+finalizar_*.txt
