@@ -44,15 +44,21 @@ def get_dme_engine():
 try:
     dme = get_dme_engine()
     st.success(
-        f"✅ DME pronto — {dme.count()} chunks | fontes: {', '.join(dme.books)}"
+        f"DME pronto - {dme.count()} chunks | fontes: {', '.join(dme.books)}"
     )
     st.caption(
-        f"Busca hibrida (vetor + BM25) com validacao LLM. "
-        f"Embeddings: ONNX local, sem torch."
+        "Busca hibrida (vetor + BM25) com validacao LLM. "
+        "Embeddings: ONNX local, sem torch."
     )
 except Exception as e:
-    st.error(f"Erro DME: {e}")
+    st.error(f"Erro ao carregar o DME: {e}")
     st.code(traceback.format_exc())
+    st.info(
+        "Se a mensagem mencionar base vazia ou ausente: as pastas "
+        "chroma_db_williams/, chroma_db_sogimig/ e chroma_db_febrasgo/ "
+        "precisam estar no repositorio. conferir no Streamlit Cloud > "
+        "Settings > Manage app > Deployment > Redeploy."
+    )
     st.stop()
 
 if "messages" not in st.session_state:

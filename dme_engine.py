@@ -115,7 +115,15 @@ class DMEEngine:
         self.docs = docs
         self.metas = metas
         self.doc_index = {d[:120]: i for i, d in enumerate(docs)}
-        self.bm25 = BM25Okapi([self._norm(d) for d in docs])
+        try:
+            self.bm25 = BM25Okapi([self._norm(d) for d in docs]) if docs else None
+        except Exception:
+            self.bm25 = None
+        if not docs:
+            raise RuntimeError(
+                "As bases existem mas estao vazias. Rodar no PC: "
+                "python index_local.py e depois python split_db.py."
+            )
 
     @property
     def groq(self) -> Groq:
@@ -174,8 +182,9 @@ class DMEEngine:
                 if i is not None:
                     add(i, 1 / (60 + rank), dist)
 
-        scores = self.bm25.get_scores(self._norm(query))
-        for rank, i in enumerate(scores.argsort()[::-1][:30]):
+        scores = (self.bm25.get_scores(self._norm(query))
+                  if self.bm25 is not None else [])
+        for rank, i in enumerate(list(scores.argsort()[::-1][:30]) if len(scores) else []):
             add(int(i), 1 / (60 + rank))
 
         out = [c for c in cands.values()
