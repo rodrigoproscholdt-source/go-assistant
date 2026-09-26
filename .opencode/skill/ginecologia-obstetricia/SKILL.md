@@ -1,6 +1,6 @@
 ---
 name: ginecologia-obstetricia
-description: Use when the case involves pregnancy, prenatal care, gynecologic tumors, menstrual disorders, menopause, contraception, or pelvic floor disorders. Activates obstetric risk stratification, cervical cancer screening, and gynecologic surgical planning.
+description: Specialist in all Gynecology and Obstetrics subspecialties - pregnancy and prenatal care, obstetric emergencies, maternal-fetal medicine, infertility and reproductive endocrinology, gynecologic endocrinology, menopause, contraception, urogynecology and pelvic floor, gynecologic oncology, breast, pediatric and adolescent gynecology, colposcopy and lower genital tract, gynecologic surgery, endometriosis, adenomyosis, fibroids, menstrual disorders, pelvic pain, infections and PID. Use for ANY clinical question in this field, including differential diagnosis, exams, and management. Activates the Differential Matrix Engine on every request.
 ---
 
 # GINECO-OBSTETRICS EXPERT CORE™ — DIFFERENTIAL MATRIX ENGINE (DME) v1.0
